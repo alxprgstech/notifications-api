@@ -82,6 +82,7 @@ public sealed class Settings
     public int SourceDailyLimit { get; init; } = 2000;
     public int AgentHeartbeatSeconds { get; init; } = 30;
     public int AgentOfflineSeconds { get; init; } = 90;
+    public int AgentSendTimeoutSeconds { get; init; } = 5;
     public long AudioQuotaBytes { get; init; } = 512L * 1024 * 1024;
     public int AudioUploadMinutes { get; init; } = 15;
     public int AudioMessageTtlDays { get; init; } = 7;
@@ -101,7 +102,7 @@ public sealed class Settings
         if (!development && !SsoConfigured) throw new InvalidOperationException("Configure owner and SSO client before production startup");
         if (RetentionDays != 30) throw new InvalidOperationException("RetentionDays must be 30 for contract v1");
         if (SourceDailyLimit is < 1 or > 100000) throw new InvalidOperationException("Invalid SourceDailyLimit");
-        if (AgentHeartbeatSeconds is < 1 or > 60 || AgentOfflineSeconds < AgentHeartbeatSeconds * 2 || AgentOfflineSeconds > 600) throw new InvalidOperationException("Invalid agent heartbeat/offline limits");
+        if (AgentHeartbeatSeconds is < 1 or > 60 || AgentOfflineSeconds < AgentHeartbeatSeconds * 2 || AgentOfflineSeconds > 600 || AgentSendTimeoutSeconds is < 1 or > 30) throw new InvalidOperationException("Invalid agent heartbeat/offline limits");
         if (AudioQuotaBytes is < 1L * 1024 * 1024 or > 50L * 1024 * 1024 * 1024 || AudioUploadMinutes is < 1 or > 60 || AudioMessageTtlDays is < 1 or > 30) throw new InvalidOperationException("Invalid audio quota/upload/retention limits");
         if (CallRingSeconds is < 1 or > 120 || CallMaxMinutes is < 1 or > 120 || CallMediaConnectSeconds is < 1 or > 60 || CallQueueFrames is < 1 or > 200) throw new InvalidOperationException("Invalid call limits");
     }

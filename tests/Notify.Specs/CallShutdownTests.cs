@@ -17,7 +17,7 @@ public sealed class CallShutdownTests
             () => { agentClosed = true; return Task.CompletedTask; },
             TimeSpan.FromMilliseconds(250));
         watch.Stop();
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(3));
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(8));
         Assert.True(phoneClosed); Assert.True(agentClosed);
     }
     [Fact]

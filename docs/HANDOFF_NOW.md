@@ -15,9 +15,9 @@
 
 Продукт 0.5.0. Один .NET 10 процесс: REST + официальный MCP C# SDK + FCM HTTP v1 + durable SQLite outbox; сообщения, подтверждения, формы, голосовые сообщения, живые звонки в обе стороны, агентский WebSocket.
 
-- **69 серверных тестов PASS** на реальной SQLite: формы, голос, elevated grants, backup, SSO-стенд, webhook retry; звонки — incoming dial, multi-device accept race, reject/busy/missed, source/device revoke, v2 relay, barge-in generation, детерминированный queue overflow `degraded`, точная привязка call-proof, запрет использовать его как отдельное разрешение.
+- **73 серверных теста PASS** на реальной SQLite: формы, голос, elevated grants, backup, SSO-стенд, webhook retry; звонки — incoming dial, multi-device accept race, reject/busy/missed, source/device revoke, v2 relay, barge-in generation, детерминированный queue overflow `degraded`, точная привязка call-proof, запрет использовать его как отдельное разрешение.
 - **Python SDK 0.5.0**: 16 тестов из исходников и установленного wheel; `dial_call/wait_call`, v2 `seq/timestamp/generation`, `CallAudio`, reconnect.
-- **Smoke** `artifacts/sdk-smoke-76f11e0c01/result.json`: REST, формы, голос, elevated grant, исходящий и входящий звонок, accepted/audio, barge-in, история, MCP.
+- **Smoke** `artifacts/sdk-smoke-ffc551e8e6/result.json`: REST, формы, голос, elevated grant, исходящий и входящий звонок, accepted/audio, barge-in, история, MCP.
 - **Android 0.5.0**: assembleDebug/assembleRelease/testDebugUnitTest/assembleDebugAndroidTest PASS, 10 JVM-тестов. Instrumentation APK собран, но не запускался без ADB-устройства. Входящий экран/уведомление, accept/reject, mute без разрыва sequence, playback generation, foreground CallStyle service, BiometricPrompt. Release unsigned.
 - **Веб**: build + Playwright PASS; история звонков с направлением, агенты, темы, mobile. `artifacts/ui/result.json`.
 - Skill 0.5.0 проходит `quick_validate.py`.
@@ -45,6 +45,7 @@
 - Входящий: `call.dial` → `call.dial_ack` → data-only FCM `{type:"call",call_id,call_state}`/`GET /calls/incoming`; первый accept окончателен, остальные видят `call_taken`/state. Микрофон не включается на приглашение. Full-screen/content intents несут только `show`; accept/decline требуют одноразового токена собственной кнопки уведомления, внешние extras без токена не принимают/не отклоняют звонок.
 - Протокол: hello `callProtocols` → `hello_ack.callProtocol` (v2 или null). Агент без общей версии не получает ringing (`call_protocol_unsupported`), но текстовые/голосовые функции работают; Android скрывает кнопки звонка без `callProtocol` v2.
 - Завершение: `CallShutdown` ограничивает сигнализацию, `TextAsync`/`SendControlAsync` имеют таймауты и Abort, `EndAsync` закрывает сокеты/очереди в `finally`. Конкурентные end/disconnect/revoke/timeout идемпотентны; следующий звонок не блокируется зависшим завершением.
+- AgentHub: hello_ack, начальная очередь и все `SendJsonAsync` привязаны к `connection.Closing` и `AgentSendTimeoutSeconds`; Disconnect/timeout/замена соединения прерывают SendLock/SendAsync, очистка удаляет только своё соединение, а неподтверждённые команды повторяются с тем же eventId.
 - Elevated call-proof: точные bytes `alxprgs.notify.call.v2` с `deviceId,direction,action,sourceId,agentId,sessionId,callId,inviteId,securityLevel,nonce,expiresAt`; проверяются все поля и срок, challenge одноразовый. Для отдельного опасного действия нужно отдельное confirmation.
 - Docker HEALTHCHECK использует `curl /health/live`; `/health/ready` отдельно проверяет SSO/Firebase. Не заменять readiness на liveness.
 - Android lock: `kotlin-stdlib-common:2.2.20` — metadata-only; запись в `app/gradle.lockfile` должна оставаться только для compile-конфигураций, иначе strict locking Gradle 8.13 падает на runtime.

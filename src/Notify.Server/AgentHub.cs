@@ -128,7 +128,8 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         try
         {
             db.Run((c, t) => { Put(c, t, "agent", agent.Id, agent with { LastSeenAt = Wire.Now }); Exec(c, t, "UPDATE agent_commands SET status='queued' WHERE agent_id=$a AND status='sent'", ("$a", agent.Id)); return 0; });
-            using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.Closing.Token); helloTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.Closing.Token);
+            using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); helloTimeout.CancelAfter(TimeSpan.FromSeconds(10));
             var hello = await ReceiveFrameAsync(connection, helloTimeout.Token);
             ApplyHello(connection, hello);
             await SendJsonAsync(connection, new
@@ -137,16 +138,19 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
                 heartbeatSeconds = settings.AgentHeartbeatSeconds, offlineSeconds = settings.AgentOfflineSeconds,
                 agent = new { agent.Id, agent.Name }, callProtocol = connection.CallProtocol,
                 supportedCallProtocols = CallService.SupportedProtocols, pendingCommands = CountPending(agent.Id)
-            }, ct);
-            await SendPendingAsync(agent.Id, ct);
-            await ReadLoopAsync(connection, ct);
+            }, lifetime.Token);
+            await SendPendingAsync(connection, lifetime.Token);
+            await ReadLoopAsync(connection, lifetime.Token);
         }
         catch (AgentProtocolException e)
         {
             closeStatus = socket.CloseStatus ?? WebSocketCloseStatus.PolicyViolation;
             closeReason = socket.CloseStatusDescription ?? e.Message;
         }
-        catch (OperationCanceledException) when (connection.Closing.IsCancellationRequested || ct.IsCancellationRequested) { }
+        catch (OperationCanceledException e)
+        {
+            log.LogInformation("Agent {AgentId} session canceled: {Type}", agent.Id, e.GetType().Name);
+        }
         catch (WebSocketException e) { log.LogInformation("Agent {AgentId} socket closed: {Status}", agent.Id, e.WebSocketErrorCode); }
         finally
         {
@@ -220,6 +224,12 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
     private async Task SendPendingAsync(string agentId, CancellationToken ct)
     {
         if (!connections.TryGetValue(agentId, out var connection)) return;
+        await SendPendingAsync(connection, ct);
+    }
+    private async Task SendPendingAsync(Connection connection, CancellationToken ct)
+    {
+        var agentId = connection.Agent.Id;
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.Closing.Token);
         var ids = db.Run((c, t) => Rows(c, t, "SELECT id FROM agent_commands WHERE agent_id=$a AND status IN ('queued','sent') AND expires>$n ORDER BY created,id LIMIT 50", ("$a", agentId), ("$n", Wire.Now)));
         foreach (var id in ids)
         {
@@ -232,7 +242,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
                 eventId = command.Id, protocolVersion = Protocol, type = "command", command = command.Type,
                 correlationId = command.CorrelationId, sessionId = command.SessionId,
                 createdAt = command.CreatedAt, expiresAt = command.ExpiresAt, payload = payload.RootElement
-            }, ct);
+            }, lifetime.Token);
             db.Run((c, t) => Exec(c, t, "UPDATE agent_commands SET status='sent',attempts=attempts+1 WHERE id=$i AND status IN ('queued','sent')", ("$i", id)));
         }
     }
@@ -259,12 +269,19 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         using var document = JsonDocument.Parse(buffer.AsMemory(0, result.Count));
         return document.RootElement.Clone();
     }
-    private static async Task SendJsonAsync(Connection connection, object payload, CancellationToken ct)
+    private async Task SendJsonAsync(Connection connection, object payload, CancellationToken ct)
     {
         var bytes = Encoding.UTF8.GetBytes(Wire.Encode(payload));
         if (bytes.Length > MaxFrameBytes) throw new AgentProtocolException("frame_too_large");
-        await connection.SendLock.WaitAsync(ct);
-        try { await connection.Socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct); }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.Closing.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(settings.AgentSendTimeoutSeconds));
+        try { await connection.SendLock.WaitAsync(timeout.Token); }
+        catch (OperationCanceledException) { try { connection.Closing.Cancel(); } catch { } throw; }
+        try
+        {
+            try { await connection.Socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, timeout.Token).WaitAsync(timeout.Token); }
+            catch (OperationCanceledException) { try { connection.Closing.Cancel(); } catch { } throw; }
+        }
         finally { connection.SendLock.Release(); }
     }
     private static string Text(JsonElement frame, string name, int max)
