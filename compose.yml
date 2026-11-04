@@ -1,0 +1,27 @@
+name: alxprgs-notify
+services:
+  notify:
+    image: alxprgs-notify:0.5.0
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: ${NOTIFY_MEMORY_LIMIT:-192m}
+    cpus: '${NOTIFY_CPU_LIMIT:-0.5}'
+    ports: ['127.0.0.1:8085:8080']
+    tmpfs: ['/tmp:size=32m,mode=1777']
+    env_file: .env
+    environment:
+      Notify__DataPath: /data
+      Notify__FirebaseCredentials: /run/secrets/firebase.json
+    volumes:
+      - notify_data:/data
+      - ${FIREBASE_CREDENTIALS_FILE:?Set a private Firebase credentials file}:/run/secrets/firebase.json:ro
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: '3'}
+volumes:
+  notify_data:
