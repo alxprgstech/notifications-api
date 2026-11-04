@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
 using System.Net.WebSockets;
@@ -25,13 +26,16 @@ public sealed class RecordingPush : IPushSender
 public sealed class FakeMediaSocket : WebSocket
 {
     private readonly Channel<byte[]>? incoming;
-    private readonly bool blockBinary;
     private readonly TaskCompletionSource blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public FakeMediaSocket(bool blockBinary = false, bool canReceive = false)
     {
-        this.blockBinary = blockBinary; if (canReceive) incoming = Channel.CreateUnbounded<byte[]>();
+        BlockBinary = blockBinary; if (canReceive) incoming = Channel.CreateUnbounded<byte[]>();
     }
+    public bool BlockBinary { get; set; }
+    public bool BlockText { get; set; }
+    public Task Blocked => blocked.Task;
+    public void BlockSends() { BlockText = true; }
     public List<byte[]> Sent { get; } = [];
     public int CloseCalls { get; private set; }
     private WebSocketState state = WebSocketState.Open;
@@ -54,9 +58,10 @@ public sealed class FakeMediaSocket : WebSocket
     {
         if (messageType == WebSocketMessageType.Binary)
         {
-            if (blockBinary) await blocked.Task;
+            if (BlockBinary) { blocked.TrySetResult(); await blocked.Task.WaitAsync(cancellationToken); }
             Sent.Add(buffer.ToArray());
         }
+        else if (BlockText) { blocked.TrySetResult(); await blocked.Task.WaitAsync(cancellationToken); }
     }
 }
 
@@ -94,6 +99,18 @@ public sealed class CallTests
         app.Services.GetRequiredService<Database>().Run((c, t) => { Put(c, t, "agent", agent.Id, agent); return 0; });
         return agent;
     }
+    private static async Task<(WebSocket Socket, JsonElement Ack)> ConnectAgentHello(AppFactory app, string token, Agent agent, string[] capabilities, string[]? callProtocols)
+    {
+        var socket = await Ws(app, token).ConnectAsync(new Uri("ws://localhost/api/v1/agents/connect"), CancellationToken.None);
+        var hello = new Dictionary<string, object?>
+        {
+            ["type"] = "hello", ["protocolVersion"] = AgentHub.Protocol, ["eventId"] = Wire.Id(), ["agentId"] = agent.Id, ["name"] = "Call runtime",
+            ["capabilities"] = capabilities, ["sessions"] = new[] { new { id = "task-1", name = "task-1" } }
+        };
+        if (callProtocols != null) hello["callProtocols"] = callProtocols;
+        await SendText(socket, hello);
+        return (socket, await ReceiveJson(socket));
+    }
     private static async Task<WebSocket> ConnectAgent(AppFactory app, string token, Agent agent, params string[] capabilities)
     {
         return await ConnectAgentSessions(app, token, agent, ["task-1"], capabilities);
@@ -101,7 +118,7 @@ public sealed class CallTests
     private static async Task<WebSocket> ConnectAgentSessions(AppFactory app, string token, Agent agent, string[] sessions, params string[] capabilities)
     {
         var socket = await Ws(app, token).ConnectAsync(new Uri("ws://localhost/api/v1/agents/connect"), CancellationToken.None);
-        await SendText(socket, new { type = "hello", protocolVersion = AgentHub.Protocol, eventId = Wire.Id(), agentId = agent.Id, name = "Call runtime", capabilities = capabilities.Length == 0 ? new[] { "realtime_audio" } : capabilities, sessions = sessions.Select(id => new { id, name = id }).ToArray() });
+        await SendText(socket, new { type = "hello", protocolVersion = AgentHub.Protocol, eventId = Wire.Id(), agentId = agent.Id, name = "Call runtime", capabilities = capabilities.Length == 0 ? new[] { "realtime_audio" } : capabilities, callProtocols = new[] { CallService.Protocol }, sessions = sessions.Select(id => new { id, name = id }).ToArray() });
         _ = await ReceiveJson(socket);
         return socket;
     }
@@ -266,6 +283,69 @@ public sealed class CallTests
             Assert.DoesNotContain(received, frame => frame.SequenceEqual(lateOld));
             Assert.Contains(received, frame => frame.SequenceEqual(fresh));
             await phoneClient.PostAsync($"/api/v1/calls/{callId}/end", null);
+        }
+    }
+
+    [Fact]
+    public async Task HelloNegotiatesCallProtocolAndOldAgentsStayTextCapable()
+    {
+        using var app = new AppFactory(); var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]); var (phoneClient, phone, phoneKey) = app.Device(); using (sourceClient) using (phoneClient) using (phoneKey)
+        {
+            var agent = RegisterAgent(app, source.Id);
+            var old = await ConnectAgentHello(app, Token(sourceClient), agent, ["text_tasks", "realtime_audio"], null); using (old.Socket)
+            {
+                Assert.Equal(JsonValueKind.Null, old.Ack.GetProperty("callProtocol").ValueKind);
+                using var agents = JsonDocument.Parse(await phoneClient.GetStringAsync("/api/v1/agents")); var listed = agents.RootElement[0];
+                Assert.True(listed.GetProperty("online").GetBoolean()); Assert.Equal(JsonValueKind.Null, listed.GetProperty("callProtocol").ValueKind); Assert.Contains("text_tasks", listed.GetProperty("capabilities").EnumerateArray().Select(c => c.GetString()));
+                var rejected = await phoneClient.PostAsJsonAsync("/api/v1/calls", new { sourceId = source.Id }); Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode); Assert.Equal("call_protocol_unsupported", (await rejected.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+                var ack = await Dial(old.Socket); Assert.False(ack.GetProperty("ok").GetBoolean()); Assert.Equal("call_protocol_unsupported", ack.GetProperty("code").GetString());
+                Assert.Equal(HttpStatusCode.NotFound, (await phoneClient.GetAsync("/api/v1/calls/incoming")).StatusCode);
+            }
+            var unknown = await ConnectAgentHello(app, Token(sourceClient), agent, ["realtime_audio"], ["alxprgs.notify.call.v9"]); using (unknown.Socket)
+            {
+                Assert.Equal(JsonValueKind.Null, unknown.Ack.GetProperty("callProtocol").ValueKind);
+                Assert.Equal(HttpStatusCode.Conflict, (await phoneClient.PostAsJsonAsync("/api/v1/calls", new { sourceId = source.Id })).StatusCode);
+            }
+            var both = await ConnectAgentHello(app, Token(sourceClient), agent, ["realtime_audio"], ["alxprgs.notify.call.v1", CallService.Protocol]); using (both.Socket)
+            {
+                Assert.Equal(CallService.Protocol, both.Ack.GetProperty("callProtocol").GetString());
+                var started = await phoneClient.PostAsJsonAsync("/api/v1/calls", new { sourceId = source.Id }); started.EnsureSuccessStatusCode(); var callId = (await started.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!;
+                _ = await ReceiveJson(both.Socket);
+                await phoneClient.PostAsync($"/api/v1/calls/{callId}/end", null);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task HungPhoneSendIsBoundedAndNextCallCanStart()
+    {
+        using var app = new AppFactory { CallMediaConnectSeconds = 10 }; var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]); var (phoneClient, phone, phoneKey) = app.Device(); using (sourceClient) using (phoneClient) using (phoneKey)
+        {
+            var agent = RegisterAgent(app, source.Id); using var control = await ConnectAgent(app, Token(sourceClient), agent);
+            var first = await phoneClient.PostAsJsonAsync("/api/v1/calls", new { sourceId = source.Id }); first.EnsureSuccessStatusCode(); var callId = (await first.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!;
+            _ = await ReceiveJson(control);
+            await SendText(control, new { type = "call.accept", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
+            await WaitStatus(phoneClient, callId, "connecting");
+            var phoneMedia = new FakeMediaSocket(); var agentMedia = new FakeMediaSocket(canReceive: true);
+            var calls = app.Services.GetRequiredService<CallService>();
+            var phoneAttachment = calls.AttachPhoneAsync(new Actor("device", phone.Id, []), callId, phoneMedia, CancellationToken.None);
+            var agentAttachment = calls.AttachAgentAsync(new Actor("integration", source.Id, ["agents:connect"]), callId, agentMedia, CancellationToken.None);
+            await WaitStatus(phoneClient, callId, "active");
+            phoneMedia.BlockBinary = true; agentMedia.Push(Frame(0, 0, 0x11));
+            await phoneMedia.Blocked.WaitAsync(TimeSpan.FromSeconds(2));
+            var watch = Stopwatch.StartNew();
+            var endings = await Task.WhenAll(phoneClient.PostAsync($"/api/v1/calls/{callId}/end", null), phoneClient.PostAsync($"/api/v1/calls/{callId}/end", null)).WaitAsync(TimeSpan.FromSeconds(10));
+            watch.Stop();
+            Assert.All(endings, response => Assert.True(response.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound));
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(8));
+            await phoneAttachment.WaitAsync(TimeSpan.FromSeconds(3)); await agentAttachment.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.True(phoneMedia.CloseCalls >= 1); Assert.True(agentMedia.CloseCalls >= 1);
+            using var state = JsonDocument.Parse(await phoneClient.GetStringAsync("/api/v1/calls/" + callId)); Assert.Equal("ended", state.RootElement.GetProperty("status").GetString());
+            var next = await phoneClient.PostAsJsonAsync("/api/v1/calls", new { sourceId = source.Id }); next.EnsureSuccessStatusCode();
+            var nextId = (await next.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!; _ = await ReceiveJson(control);
+            await SendText(control, new { type = "call.accept", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId = nextId } });
+            await WaitStatus(phoneClient, nextId, "connecting");
+            await phoneClient.PostAsync($"/api/v1/calls/{nextId}/end", null);
         }
     }
 

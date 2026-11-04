@@ -68,8 +68,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         handler = Handler()
 
         async def server(socket):
-            await socket.recv()
-            await socket.send(json.dumps({"eventId": "h" * 32, "protocolVersion": PROTOCOL, "type": "hello_ack", "heartbeatSeconds": 30, "offlineSeconds": 90}))
+            hello_frame = json.loads(await socket.recv()); self.assertIn(CALL_PROTOCOL, hello_frame["callProtocols"])
+            await socket.send(json.dumps({"eventId": "h" * 32, "protocolVersion": PROTOCOL, "type": "hello_ack", "heartbeatSeconds": 30, "offlineSeconds": 90, "callProtocol": CALL_PROTOCOL, "supportedCallProtocols": [CALL_PROTOCOL]}))
             raw = json.loads(await socket.recv()); control_events.append(raw)
             await socket.send(json.dumps({"eventId": "a" * 32, "protocolVersion": CALL_PROTOCOL, "type": "call.dial_ack", "payload": {"requestEventId": raw["eventId"], "ok": True, "callId": call_id, "inviteId": "i" * 32, "status": "ringing", "expiresAt": 9999999999999}}))
             await socket.send(json.dumps({"eventId": "b" * 32, "protocolVersion": CALL_PROTOCOL, "type": "call.accepted", "payload": {"callId": call_id, "deviceId": "p" * 32, "deviceName": "Pixel"}}))
@@ -101,6 +101,38 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control_events[0]["type"], "call.dial"); self.assertEqual(control_events[0]["payload"]["sessionId"], "task-1"); self.assertEqual(control_events[0]["payload"]["securityLevel"], "elevated")
         self.assertEqual(control_events[1]["type"], "call.dial")
 
+    async def test_old_agent_without_call_protocol_keeps_non_voice_commands(self):
+        handled = asyncio.Event(); command_id = "o" * 32
+
+        class Handler:
+            async def on_invite(self, connector, call): return None
+            async def on_interrupt(self, call_id, generation): return None
+            async def on_ended(self, call_id, reason): return None
+
+        async def runtime(command):
+            self.assertEqual(command["type"], "task")
+            handled.set()
+
+        async def server(socket):
+            await socket.recv()
+            await socket.send(json.dumps({"eventId": "h" * 32, "protocolVersion": PROTOCOL, "type": "hello_ack", "heartbeatSeconds": 30, "offlineSeconds": 90}))
+            await socket.send(json.dumps({"eventId": command_id, "protocolVersion": PROTOCOL, "type": "command", "command": "task", "createdAt": 1, "expiresAt": 9999999999999, "payload": {"taskId": "t1"}}))
+            await socket.recv()  # ack
+            await asyncio.sleep(0.2)
+
+        async with websockets.serve(server, "127.0.0.1", 0) as srv:
+            port = srv.sockets[0].getsockname()[1]
+            connector = AgentConnector(f"http://127.0.0.1:{port}", "nt_test", agent_id="agent-old", name="Old agent", capabilities=["text_tasks", "realtime_audio"], runtime=CallbackRuntime(runtime), call_handler=Handler())
+            task = asyncio.create_task(connector.run())
+            try:
+                await asyncio.wait_for(handled.wait(), timeout=5)
+                self.assertIsNone(connector.call_protocol)
+                with self.assertRaises(NotifyCallError) as rejected:
+                    await connector.dial_call()
+                self.assertEqual(rejected.exception.code, "call_protocol_unsupported")
+            finally:
+                await connector.stop(); task.cancel(); await asyncio.gather(task, return_exceptions=True)
+
     async def test_call_invite_accept_and_end(self):
         call_id = "c" * 32
         accepted = asyncio.Event()
@@ -123,8 +155,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         control_events = []
 
         async def server(socket):
-            await socket.recv()
-            await socket.send(json.dumps({"eventId": "h" * 32, "protocolVersion": PROTOCOL, "type": "hello_ack", "heartbeatSeconds": 30, "offlineSeconds": 90}))
+            hello_frame = json.loads(await socket.recv()); self.assertIn(CALL_PROTOCOL, hello_frame["callProtocols"])
+            await socket.send(json.dumps({"eventId": "h" * 32, "protocolVersion": PROTOCOL, "type": "hello_ack", "heartbeatSeconds": 30, "offlineSeconds": 90, "callProtocol": CALL_PROTOCOL, "supportedCallProtocols": [CALL_PROTOCOL]}))
             await socket.send(json.dumps({"eventId": "i" * 32, "protocolVersion": PROTOCOL, "type": "call.invite", "payload": {"callId": call_id, "sessionId": "task-1", "securityLevel": "standard"}}))
             control_events.append(json.loads(await socket.recv()))
             await socket.send(json.dumps({"eventId": "e" * 32, "protocolVersion": PROTOCOL, "type": "call.ended", "payload": {"callId": call_id, "reason": "disconnected"}}))

@@ -12,6 +12,7 @@ namespace Notify;
 public sealed class CallService
 {
     public const string Protocol = "alxprgs.notify.call.v2";
+    public static readonly string[] SupportedProtocols = [Protocol];
     public const int AudioBytes = 640;
     public const int HeaderBytes = 12;
     public const int FrameBytes = HeaderBytes + AudioBytes;
@@ -51,11 +52,22 @@ public sealed class CallService
         public CancellationTokenSource Cts { get; } = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         public TaskCompletionSource Closed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public long LastSeq = -1, LastTimestamp = -1;
-        public async Task TextAsync(string json)
+        public async Task<bool> TextAsync(string json, CancellationToken ct = default)
         {
-            if (!await SendLock.WaitAsync(TimeSpan.FromSeconds(1))) return;
-            try { if (Socket.State == WebSocketState.Open) await Socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None); }
-            catch { }
+            if (!await SendLock.WaitAsync(TimeSpan.FromSeconds(2))) return false;
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                if (Socket.State != WebSocketState.Open) return false;
+                await Socket.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, timeout.Token).WaitAsync(timeout.Token);
+                return true;
+            }
+            catch (Exception e) when (e is WebSocketException or OperationCanceledException or ObjectDisposedException)
+            {
+                try { Socket.Abort(); } catch { }
+                return false;
+            }
             finally { SendLock.Release(); }
         }
     }
@@ -68,6 +80,7 @@ public sealed class CallService
         var agent = agents.ForSource(input.SourceId) ?? throw new Fault(404, "agent_not_registered");
         var online = agents.Online(agent.Id) ?? throw new Fault(409, "agent_offline");
         if (!online.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) throw new Fault(409, "agent_unsupported");
+        if (online.CallProtocol != Protocol) throw new Fault(409, "call_protocol_unsupported");
         if (input.SessionId != null && online.Sessions.All(s => s.Id != input.SessionId)) throw new Fault(400, "invalid_session");
         return CreateChallenge(actor, "outgoing", "start", input.SourceId, agent.Id, input.SessionId, null, null, "elevated");
     }
@@ -100,6 +113,7 @@ public sealed class CallService
         var agent = agents.ForSource(input.SourceId) ?? throw new Fault(404, "agent_not_registered");
         var online = agents.Online(agent.Id) ?? throw new Fault(409, "agent_offline");
         if (!online.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) throw new Fault(409, "agent_unsupported");
+        if (online.CallProtocol != Protocol) throw new Fault(409, "call_protocol_unsupported");
         if (input.SessionId != null && online.Sessions.All(s => s.Id != input.SessionId)) throw new Fault(400, "invalid_session");
         lock (sync) { if (currentId != null) throw new Fault(409, "busy"); }
         if (input.SecurityLevel == "elevated") VerifyChallenge(actor, input.ChallengeId, input.Signature, "outgoing", "start", input.SourceId, agent.Id, input.SessionId, null, null, "elevated");
@@ -158,6 +172,7 @@ public sealed class CallService
         var online = agents.Online(agent.Id);
         if (online == null) { await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "agent_offline" }); return; }
         if (!online.Value.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) { await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "agent_unsupported" }); return; }
+        if (online.Value.CallProtocol != Protocol) { await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "call_protocol_unsupported" }); return; }
         var security = payload.TryGetProperty("securityLevel", out var level) ? level.GetString() : "standard";
         var sessionId = payload.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String ? session.GetString() : null;
         var title = payload.TryGetProperty("title", out var titleValue) && titleValue.ValueKind == JsonValueKind.String ? titleValue.GetString() : null;
@@ -422,13 +437,25 @@ public sealed class CallService
         }
         call.Cts.Cancel();
         log.LogInformation("Call {CallId} ({Direction}) ended: {Reason}", call.Id, call.Direction, reason);
-        var duration = call.ActiveAt is { } active ? (int)Math.Min(int.MaxValue, call.EndedAt!.Value - active) : 0;
-        db.Run((c, t) => { Put(c, t, "call", call.Id, new CallRecord(call.Id, call.SourceId, call.AgentId, deviceId, call.SessionId, call.SecurityLevel, call.StartedAt, call.EndedAt!.Value, "ended", reason, duration, call.Direction)); return 0; });
-        await agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, reason });
-        if (phone != null) await phone.TextAsync(Wire.Encode(new { type = "ended", reason }));
-        if (call.Direction == "incoming") _ = PushCallAsync(call, reason is "rejected" or "missed" or "disconnected" or "revoked" ? reason : "ended");
-        await CloseSide(phone, reason); await CloseSide(agentMedia, reason);
-        lock (sync) calls.Remove(call.Id);
+        try
+        {
+            try
+            {
+                var duration = call.ActiveAt is { } active ? (int)Math.Min(int.MaxValue, call.EndedAt!.Value - active) : 0;
+                db.Run((c, t) => { Put(c, t, "call", call.Id, new CallRecord(call.Id, call.SourceId, call.AgentId, deviceId, call.SessionId, call.SecurityLevel, call.StartedAt, call.EndedAt!.Value, "ended", reason, duration, call.Direction)); return 0; });
+            }
+            catch (Exception e) { log.LogWarning("Call {CallId} history write failed: {Type}", call.Id, e.GetType().Name); }
+            if (call.Direction == "incoming") _ = PushCallAsync(call, reason is "rejected" or "missed" or "disconnected" or "revoked" ? reason : "ended");
+            await CallShutdown.RunAsync(
+                ct => agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, reason }, ct),
+                ct => phone?.TextAsync(Wire.Encode(new { type = "ended", reason }), ct) ?? Task.CompletedTask,
+                () => CloseSide(phone, reason), () => CloseSide(agentMedia, reason),
+                TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            lock (sync) calls.Remove(call.Id);
+        }
     }
     private static async Task CloseSide(MediaSide? side, string reason)
     {

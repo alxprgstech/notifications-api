@@ -78,6 +78,7 @@ class AgentConnector:
         sessions: Sequence[dict[str, str]] = (),
         runtime: AgentRuntime,
         call_handler: CallHandler | None = None,
+        call_protocols: Sequence[str] | None = None,
         heartbeat_seconds: int = 30,
         max_seen_commands: int = 1000,
     ):
@@ -87,11 +88,16 @@ class AgentConnector:
             raise ValueError("Invalid agent id")
         if not 1 <= heartbeat_seconds <= 60:
             raise ValueError("heartbeat_seconds must be 1..60")
+        self._capabilities = list(capabilities)
+        offered = list(call_protocols) if call_protocols is not None else ([CALL_PROTOCOL] if "realtime_audio" in self._capabilities else [])
+        if len(offered) > 8 or len(set(offered)) != len(offered) or any(not isinstance(p, str) or not 1 <= len(p) <= 64 for p in offered):
+            raise ValueError("Invalid call protocols")
+        self._call_protocols = offered
+        self._call_protocol: str | None = None
         self._base = _url(base_url)
         parsed = urlparse(self._base)
         self._url = ("wss://" if parsed.scheme == "https" else "ws://") + parsed.netloc + "/api/v1/agents/connect"
         self._token, self._agent_id, self._name = token, agent_id, name
-        self._capabilities = list(capabilities)
         self._sessions = list(sessions)
         self._runtime = runtime
         self._call_handler = call_handler
@@ -138,6 +144,7 @@ class AgentConnector:
         self._sessions = list(sessions)
 
     async def _session(self) -> None:
+        self._call_protocol = None
         async with websockets.connect(
             self._url,
             additional_headers={"Authorization": f"Bearer {self._token}"},
@@ -149,11 +156,13 @@ class AgentConnector:
             await socket.send(json.dumps({
                 "type": "hello", "protocolVersion": PROTOCOL, "eventId": _event(),
                 "agentId": self._agent_id, "name": self._name, "capabilities": self._capabilities,
-                "sessions": self._sessions, "client": "alxprgs-notify-sdk",
+                "callProtocols": self._call_protocols, "sessions": self._sessions, "client": "alxprgs-notify-sdk",
             }))
             hello = json.loads(await asyncio.wait_for(socket.recv(), timeout=10))
             if hello.get("type") != "hello_ack":
                 raise RuntimeError("Notify did not acknowledge the agent hello")
+            selected = hello.get("callProtocol")
+            self._call_protocol = selected if isinstance(selected, str) else None
             self._heartbeat_seconds = int(hello.get("heartbeatSeconds", self._heartbeat_seconds))
             self._socket = socket
             self._control = socket
@@ -269,8 +278,14 @@ class AgentConnector:
             raise RuntimeError("agent is not connected")
         await control.send(json.dumps({"type": kind, "protocolVersion": CALL_PROTOCOL, "eventId": event_id or _event(), "payload": payload}))
 
+    @property
+    def call_protocol(self) -> str | None:
+        return self._call_protocol
+
     async def dial_call(self, session_id: str | None = None, security_level: str = "standard", title: str | None = None, timeout: float = 10) -> dict[str, Any]:
         """Ask the server to ring the owner. Does not open a microphone."""
+        if self._call_protocol != CALL_PROTOCOL:
+            raise NotifyCallError("call_protocol_unsupported")
         if security_level not in ("standard", "elevated"):
             raise ValueError("security_level must be standard or elevated")
         if session_id is not None and (not isinstance(session_id, str) or len(session_id) > 64):
@@ -323,6 +338,8 @@ class AgentConnector:
 
     @asynccontextmanager
     async def call_audio(self, call_id: str):
+        if self._call_protocol != CALL_PROTOCOL:
+            raise NotifyCallError("call_protocol_unsupported")
         if len(call_id) != 32:
             raise ValueError("Invalid call id")
         parsed = urlparse(self._base)

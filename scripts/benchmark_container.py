@@ -104,7 +104,7 @@ try:
         frames = max(1, int(call_seconds / 0.02))
         samples = []
         async with websockets.connect(ws_origin + "/api/v1/agents/connect", additional_headers={"Authorization": "Bearer " + token}, max_size=65536, max_queue=None, ping_interval=None) as control:
-            await control.send(json.dumps({"type": "hello", "protocolVersion": "alxprgs.notify.agent.v1", "eventId": secrets.token_hex(16), "agentId": agent, "name": "Bench agent", "capabilities": ["realtime_audio"], "sessions": [{"id": "bench", "name": "Bench"}]}))
+            await control.send(json.dumps({"type": "hello", "protocolVersion": "alxprgs.notify.agent.v1", "eventId": secrets.token_hex(16), "agentId": agent, "name": "Bench agent", "capabilities": ["realtime_audio"], "callProtocols": ["alxprgs.notify.call.v2"], "sessions": [{"id": "bench", "name": "Bench"}]}))
             json.loads(await control.recv())
             async def heartbeat():
                 while True:

@@ -42,7 +42,7 @@ public sealed record Job(string Id, string Kind, string NotificationId, string T
 public sealed record EnrollDevice(string Name, string PublicKey, string? FcmToken = null, bool Recovery = false);
 public sealed record Enrollment(string Id, EnrollDevice Device, string Owner, long ExpiresAt, string? ProtectedToken = null, bool Completed = false);
 public sealed record StepUpState(string Id, string Kind, string TargetId, string Owner, string PayloadHash, string State, string Nonce, string Verifier, long ExpiresAt);
-public sealed record Agent(string Id, string SourceId, string Name, string[] Capabilities, long CreatedAt, long? LastSeenAt = null, bool Revoked = false);
+public sealed record Agent(string Id, string SourceId, string Name, string[] Capabilities, long CreatedAt, long? LastSeenAt = null, bool Revoked = false, string[]? CallProtocols = null, string? CallProtocol = null);
 public sealed record AgentSession(string Id, string Name);
 public sealed record CallStart(string SourceId, string? SessionId = null, string SecurityLevel = "standard", string? ChallengeId = null, string? Signature = null);
 public sealed record CallChallengeInput(string SourceId, string? SessionId = null, string SecurityLevel = "standard");

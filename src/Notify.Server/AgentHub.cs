@@ -27,21 +27,29 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         public CancellationTokenSource Closing { get; } = new();
         public AgentSession[] Sessions { get; set; } = [];
         public string[] Capabilities { get; set; } = agent.Capabilities;
+        public string[] CallProtocols { get; set; } = agent.CallProtocols ?? [];
+        public string? CallProtocol { get; set; } = agent.CallProtocol;
         public long LastSeen { get; set; } = Wire.Now;
     }
 
     public bool IsOnline(string agentId) => connections.ContainsKey(agentId);
-    public (Agent Agent, string[] Capabilities, AgentSession[] Sessions)? Online(string agentId) =>
-        connections.TryGetValue(agentId, out var connection) ? (connection.Agent, connection.Capabilities, connection.Sessions) : null;
+    public (Agent Agent, string[] Capabilities, AgentSession[] Sessions, string[] CallProtocols, string? CallProtocol)? Online(string agentId) =>
+        connections.TryGetValue(agentId, out var connection) ? (connection.Agent, connection.Capabilities, connection.Sessions, connection.CallProtocols, connection.CallProtocol) : null;
     public async Task<bool> SendControlAsync(string agentId, string type, object payload, CancellationToken ct = default)
     {
         if (!connections.TryGetValue(agentId, out var connection)) return false;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
         try
         {
-            await SendJsonAsync(connection, new { eventId = Wire.Id(), protocolVersion = Protocol, type, serverTime = Wire.Now, payload }, ct);
+            await SendJsonAsync(connection, new { eventId = Wire.Id(), protocolVersion = Protocol, type, serverTime = Wire.Now, payload }, timeout.Token).WaitAsync(timeout.Token);
             return true;
         }
-        catch (Exception e) when (e is WebSocketException or OperationCanceledException or AgentProtocolException) { log.LogInformation("Agent control send failed for {AgentId}: {Type}", agentId, e.GetType().Name); return false; }
+        catch (Exception e) when (e is WebSocketException or OperationCanceledException or AgentProtocolException or TimeoutException)
+        {
+            try { connection.Closing.Cancel(); } catch { }
+            log.LogInformation("Agent control send failed for {AgentId}: {Type}", agentId, e.GetType().Name); return false;
+        }
     }
     public Agent? ForSource(string sourceId) => db.Run((c, t) => All<Agent>(c, t, "agent").FirstOrDefault(a => a.SourceId == sourceId && !a.Revoked));
     public Agent? Get(string agentId) => db.Run((c, t) => Get<Agent>(c, t, "agent", agentId));
@@ -51,7 +59,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         return db.Run((c, t) => All<Agent>(c, t, "agent").Select(agent =>
         {
             var live = !agent.Revoked && connections.TryGetValue(agent.Id, out var found) ? found : null;
-            return (object)new { agent.Id, agent.SourceId, agent.Name, agent.Capabilities, agent.Revoked, online = live != null, lastSeenAt = agent.LastSeenAt, sessions = live?.Sessions ?? Array.Empty<AgentSession>() };
+            return (object)new { agent.Id, agent.SourceId, agent.Name, agent.Capabilities, CallProtocols = live?.CallProtocols ?? agent.CallProtocols ?? [], CallProtocol = live?.CallProtocol ?? agent.CallProtocol, agent.Revoked, online = live != null, lastSeenAt = agent.LastSeenAt, sessions = live?.Sessions ?? Array.Empty<AgentSession>() };
         }).ToList());
     }
 
@@ -127,7 +135,8 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
             {
                 eventId = Wire.Id(), protocolVersion = Protocol, type = "hello_ack", serverTime = Wire.Now,
                 heartbeatSeconds = settings.AgentHeartbeatSeconds, offlineSeconds = settings.AgentOfflineSeconds,
-                agent = new { agent.Id, agent.Name }, pendingCommands = CountPending(agent.Id)
+                agent = new { agent.Id, agent.Name }, callProtocol = connection.CallProtocol,
+                supportedCallProtocols = CallService.SupportedProtocols, pendingCommands = CountPending(agent.Id)
             }, ct);
             await SendPendingAsync(agent.Id, ct);
             await ReadLoopAsync(connection, ct);
@@ -147,10 +156,11 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
             if (DisconnectedEvent is { } disconnected) { try { await disconnected(agent); } catch { } }
             try
             {
+                using var closeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
-                    await socket.CloseAsync(closeStatus ?? WebSocketCloseStatus.NormalClosure, closeReason is { Length: > 0 } ? closeReason[..Math.Min(100, closeReason.Length)] : "closed", CancellationToken.None);
+                    await socket.CloseAsync(closeStatus ?? WebSocketCloseStatus.NormalClosure, closeReason is { Length: > 0 } ? closeReason[..Math.Min(100, closeReason.Length)] : "closed", closeTimeout.Token);
             }
-            catch { }
+            catch { try { socket.Abort(); } catch { } }
             socket.Dispose();
         }
     }
@@ -165,9 +175,11 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         if (name.Any(char.IsControl)) throw new AgentProtocolException("invalid_hello");
         var capabilities = Strings(hello, "capabilities");
         if (capabilities.Length > KnownCapabilities.Length || capabilities.Distinct(StringComparer.Ordinal).Count() != capabilities.Length || capabilities.Any(c => !KnownCapabilities.Contains(c, StringComparer.Ordinal))) throw new AgentProtocolException("invalid_capabilities");
+        var callProtocols = OptionalStrings(hello, "callProtocols", 8);
         var sessions = Sessions(hello);
-        connection.Capabilities = capabilities; connection.Sessions = sessions;
-        db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", connection.Agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { Name = name, Capabilities = capabilities, LastSeenAt = Wire.Now }); return 0; });
+        connection.Capabilities = capabilities; connection.Sessions = sessions; connection.CallProtocols = callProtocols;
+        connection.CallProtocol = callProtocols.FirstOrDefault(protocol => CallService.SupportedProtocols.Contains(protocol, StringComparer.Ordinal));
+        db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", connection.Agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { Name = name, Capabilities = capabilities, CallProtocols = callProtocols, CallProtocol = connection.CallProtocol, LastSeenAt = Wire.Now }); return 0; });
     }
 
     private async Task ReadLoopAsync(Connection connection, CancellationToken ct)
@@ -266,6 +278,14 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
     {
         if (!frame.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Array) throw new AgentProtocolException("invalid_field_" + name);
         return value.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String && item.GetString() is { Length: >= 1 and <= 64 } text ? text : throw new AgentProtocolException("invalid_field_" + name)).ToArray();
+    }
+    private static string[] OptionalStrings(JsonElement frame, string name, int max)
+    {
+        if (!frame.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return [];
+        if (value.ValueKind != JsonValueKind.Array || value.GetArrayLength() > max) throw new AgentProtocolException("invalid_field_" + name);
+        var values = value.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.String && item.GetString() is { Length: >= 1 and <= 64 } text ? text : throw new AgentProtocolException("invalid_field_" + name)).ToArray();
+        if (values.Distinct(StringComparer.Ordinal).Count() != values.Length) throw new AgentProtocolException("invalid_field_" + name);
+        return values;
     }
     private static AgentSession[] Sessions(JsonElement frame)
     {
