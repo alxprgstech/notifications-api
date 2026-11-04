@@ -17,7 +17,7 @@
 
 - **73 серверных теста PASS** на реальной SQLite: формы, голос, elevated grants, backup, SSO-стенд, webhook retry; звонки — incoming dial, multi-device accept race, reject/busy/missed, source/device revoke, v2 relay, barge-in generation, детерминированный queue overflow `degraded`, точная привязка call-proof, запрет использовать его как отдельное разрешение.
 - **Python SDK 0.5.0**: 16 тестов из исходников и установленного wheel; `dial_call/wait_call`, v2 `seq/timestamp/generation`, `CallAudio`, reconnect.
-- **Smoke** `artifacts/sdk-smoke-ffc551e8e6/result.json`: REST, формы, голос, elevated grant, исходящий и входящий звонок, accepted/audio, barge-in, история, MCP.
+- **Smoke** `artifacts/sdk-smoke-8ca67ce98f/result.json`: REST, формы, голос, elevated grant, исходящий и входящий звонок, accepted/audio, barge-in, история, MCP.
 - **Android 0.5.0**: assembleDebug/assembleRelease/testDebugUnitTest/assembleDebugAndroidTest PASS, 10 JVM-тестов. Instrumentation APK собран, но не запускался без ADB-устройства. Входящий экран/уведомление, accept/reject, mute без разрыва sequence, playback generation, foreground CallStyle service, BiometricPrompt. Release unsigned.
 - **Веб**: build + Playwright PASS; история звонков с направлением, агенты, темы, mobile. `artifacts/ui/result.json`.
 - Skill 0.5.0 проходит `quick_validate.py`.
