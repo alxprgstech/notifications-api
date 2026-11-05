@@ -167,6 +167,9 @@ public sealed class AgentHubHangTests
                 Assert.True(first.Closed || first.Aborted);
                 Assert.True(hub.IsOnline(agent.Id));
                 Assert.False(second.Closed);
+                second.PushJson(Wire.Encode(new { type = "heartbeat", protocolVersion = AgentHub.Protocol, eventId = Wire.Id() }));
+                var heartbeatAck = await Next(second, ready.Token);
+                Assert.Equal("heartbeat_ack", heartbeatAck.GetProperty("type").GetString());
             }
             finally { await Finish(hub, agent, second, secondRun); }
         }

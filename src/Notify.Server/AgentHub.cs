@@ -155,7 +155,8 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         finally
         {
             connection.Closing.Cancel();
-            if (connections.TryGetValue(agent.Id, out var current) && ReferenceEquals(current, connection)) connections.TryRemove(agent.Id, out _);
+            // Compare and remove atomically: a replacement must survive this connection's cleanup.
+            connections.TryRemove(new KeyValuePair<string, Connection>(agent.Id, connection));
             db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { LastSeenAt = Wire.Now }); return 0; });
             if (DisconnectedEvent is { } disconnected) { try { await disconnected(agent); } catch { } }
             try
