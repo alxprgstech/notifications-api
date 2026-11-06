@@ -13,6 +13,10 @@ src/Notify.Server/wwwroot/
 data/
 artifacts/
 .env
+home.env
+sso-web.json
+owner-sub.txt
+firebase-service-account*.json
 *.db*
 *.pem
 service-account*.json

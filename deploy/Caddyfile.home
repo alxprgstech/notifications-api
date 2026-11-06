@@ -1,0 +1,33 @@
+{
+    admin off
+    http_port 8080
+    https_port 8443
+    auto_https disable_redirects
+    log {
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers>Authorization delete
+                request>headers>Cookie delete
+            }
+        }
+    }
+    # TLS uses TCP; no extra UDP port forwarding is required.
+    servers {
+        protocols h1 h2
+    }
+}
+
+http://{$NOTIFY_DOMAIN:notify.alxprgs.tech}:8080 {
+    # The public HTTPS port is 443; the container's 8443 must not enter redirects.
+    redir https://{$NOTIFY_DOMAIN:notify.alxprgs.tech}{uri} permanent
+}
+
+{$NOTIFY_DOMAIN:notify.alxprgs.tech} {
+    # Do not enable access logs: SSO callbacks contain single-use credentials.
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy notify:8080 {
+        flush_interval -1
+    }
+}

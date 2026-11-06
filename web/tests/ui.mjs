@@ -23,7 +23,7 @@ try{
   const spec=await (await fetch(origin+'/openapi/v1.json')).json();assert.ok(spec.paths['/api/v1/notifications']);
   await page.goto(origin+'/docs');await page.getByRole('heading',{name:'Подключите свой источник',exact:true}).waitFor();await page.getByText('ALXPRGS Notify API',{exact:true}).first().waitFor({timeout:20000});
   await page.screenshot({path:fileURLToPath(new URL('docs.png',artifact)),fullPage:false});
-  const guides={contract:'Контракт v1',security:'Безопасность и SSO',operations:'Установка и эксплуатация'};
+  const guides={contract:'Контракт v1',security:'Безопасность и SSO',operations:'Установка и эксплуатация',home:'Notify на домашнем Windows-ПК'};
   for(const [id,heading] of Object.entries(guides)){await page.goto(origin+'/docs/guide/'+id);await page.getByRole('heading',{name:heading,exact:true}).waitFor({timeout:15000});await page.getByRole('navigation',{name:'Разделы документации'}).waitFor();}
   await page.screenshot({path:fileURLToPath(new URL('docs-guide.png',artifact)),fullPage:false});
   const id='a'.repeat(32);const now=Date.now();

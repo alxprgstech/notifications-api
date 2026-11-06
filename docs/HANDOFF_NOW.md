@@ -1,5 +1,7 @@
 # Точка передачи 0.5.0 — продолжение ALXPRGS Notify
 
+Обновление 2026-11-07: Notify запущен на домашнем ПК в Docker, Caddy обслуживает https://notify.alxprgs.tech. HTTPS readiness, OAuth redirect/PKCE, assetlinks и Google OAuth проверены. На SSO включён external step-up без деплоя кода. Персональный APK подписан и собран с реальным Firebase; 10 JVM tests PASS. Приватные файлы — LocalAppData, не Git. Команды и ограничения — [HOME_HOSTING](HOME_HOSTING.md). Телефон не подключён к ADB; реальная привязка/FCM/биометрия ещё не приняты.
+
 История предыдущего чата не нужна: состояние и решения зафиксированы в репозитории. Код не сбрасывать и не начинать с шаблонов. Локальные коммиты находятся в ветке `codex/calls-v0.5.0`; push и production-деплой не выполнялись.
 
 Последняя правка 2026-11-05: реестр AgentHub очищается атомарным удалением пары `(agentId, connection)`, без гонки между проверкой ссылки и удалением по ключу. **73 серверных теста PASS**, тест замены дополнительно проверяет heartbeat нового соединения после завершения старого. Smoke **PASS**: `artifacts/sdk-smoke-0aa50595cf/result.json`. Docker build **PASS**; Android и длительный замер не повторялись.

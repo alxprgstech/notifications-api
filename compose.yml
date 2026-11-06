@@ -13,13 +13,18 @@ services:
     cpus: '${NOTIFY_CPU_LIMIT:-0.5}'
     ports: ['127.0.0.1:8085:8080']
     tmpfs: ['/tmp:size=32m,mode=1777']
-    env_file: .env
+    env_file: ${NOTIFY_ENV_FILE:-.env}
     environment:
       Notify__DataPath: /data
       Notify__FirebaseCredentials: /run/secrets/firebase.json
     volumes:
       - notify_data:/data
-      - ${FIREBASE_CREDENTIALS_FILE:?Set a private Firebase credentials file}:/run/secrets/firebase.json:ro
+      - type: bind
+        source: ${FIREBASE_CREDENTIALS_FILE:?Set a private Firebase credentials file}
+        target: /run/secrets/firebase.json
+        read_only: true
+        bind:
+          create_host_path: false
     logging:
       driver: json-file
       options: {max-size: 5m, max-file: '3'}
