@@ -1,4 +1,52 @@
-import Guide, { guideLinks } from './guides';
+
+import Guide from './guides';
 import { ApiReferenceReact } from '@scalar/api-reference-react';
 import '@scalar/api-reference-react/style.css';
-export default function Reference(){if(location.pathname.startsWith("/docs/guide/"))return <><header className="docs-header"><a className="wordmark" href="/docs">Notify<span>ALXPRGS</span></a><a href="/">Кабинет ↗</a></header><Guide/></>;return <><header className="docs-header"><a className="wordmark" href="/">Notify<span>ALXPRGS</span></a><span>Документация · v0.5.0</span><a href="/">Кабинет ↗</a></header><section className="docs-intro"><div className="eyebrow">DEVELOPER DOCUMENTATION</div><h1>Подключите свой источник</h1><p>Создайте интеграцию в кабинете и подтвердите её на телефоне. Передавайте токен через <code>Authorization: Bearer</code>, ключ повторной отправки — через <code>Idempotency-Key</code>.</p><nav className="guide-links" aria-label="Руководства">{guideLinks.map(([id,title])=><a key={id} href={"/docs/guide/"+id}>{title} ↗</a>)}</nav><div className="docs-grid"><div><h2>Python SDK</h2><pre>{`with NotifyClient(url, token) as client:\n    client.send("Готово", "Задача завершена",\n        idempotency_key="task-42-complete")`}</pre></div><div><h2>MCP и решения</h2><p>HTTP: <code>/mcp</code> с токеном интеграции. Локальный адаптер: <code>notify-mcp</code>.</p><p>Только <code>answered + yes</code> означает согласие. Ожидание, отказ, истечение и ошибка его не дают.</p></div><div><h2>Webhooks</h2><p>Проверяйте HMAC-SHA256 от <code>timestamp + "." + raw_body</code> и свежесть timestamp. Доставка повторяется; сохраняйте обработанные <code>eventId</code>.</p></div></div><p>Сообщения, подтверждения, формы, голосовые сообщения и живые звонки доступны сейчас; текущее состояние публикуется в <a href="/api/config">capabilities</a>. Полные инструкции и пример агента находятся в комплекте проекта.</p></section><ApiReferenceReact configuration={{url:'/openapi/v1.json',withDefaultFonts:false,showDeveloperTools:'never',agent:{disabled:true},hideClientButton:true,persistAuth:false,defaultOpenAllTags:false,customCss:':root { --scalar-color-accent: #1764ed; }',authentication:{preferredSecurityScheme:'Bearer'}}}/></>;}
+import { Brand, Icon, ThemeControl, guideLinks, useTheme } from './ui';
+
+const example = [
+  'with NotifyClient(url, token) as client:',
+  '    client.send("Готово", "Задача завершена",',
+  '        idempotency_key="task-42-complete")',
+].join('\n');
+
+export default function Reference() {
+  const { resolved } = useTheme();
+  const guide = location.pathname.startsWith('/docs/guide/');
+  return <div className="public-shell docs-shell">
+    <header className="topbar public-topbar">
+      <div className="top-start"><Brand href="/docs" /><span className="top-divider" /><a className="breadcrumb" href="/docs">Документация</a></div>
+      <div className="top-actions">
+        <ThemeControl /><a className="button secondary" href="/">Кабинет <Icon name="external" size={16} /></a>
+      </div>
+    </header>
+    {guide ? <Guide /> : <div className="docs-main">
+      <section className="docs-intro" aria-labelledby="docs-title">
+        <p className="eyebrow"><Icon name="book" size={16} /> ДОКУМЕНТАЦИЯ ДЛЯ РАЗРАБОТЧИКОВ</p>
+        <h1 id="docs-title">Подключите свой источник</h1>
+        <p className="docs-lead">Создайте интеграцию в кабинете и подтвердите её на телефоне. Передавайте токен через <code>Authorization: Bearer</code>, ключ повторной отправки — через <code>Idempotency-Key</code>.</p>
+        <nav className="guide-links" aria-label="Руководства">
+          {guideLinks.map(([id, title]) => <a className="button secondary" key={id} href={'/docs/guide/' + id}>{title} <Icon name="arrow" size={15} /></a>)}
+        </nav>
+        <div className="docs-grid">
+          <section className="panel doc-card"><span className="entity-icon accent"><Icon name="form" /></span><h2>Python SDK</h2><pre>{example}</pre></section>
+          <section className="panel doc-card"><span className="entity-icon accent"><Icon name="agent" /></span><h2>MCP и решения</h2>
+            <p>HTTP: <code>/mcp</code> с токеном интеграции. Локальный адаптер: <code>notify-mcp</code>.</p>
+            <p>Согласие означает только <code>answered + yes</code>.</p></section>
+          <section className="panel doc-card"><span className="entity-icon accent"><Icon name="link" /></span><h2>Webhooks</h2>
+            <p>Проверяйте HMAC-SHA256 от <code>timestamp + "." + raw_body</code> и свежесть timestamp. При повторной доставке проверяйте <code>eventId</code>.</p></section>
+        </div>
+        <p>Доступные возможности и версии опубликованы в <a href="/api/config">конфигурации Notify</a>.</p>
+      </section>
+      <section className="reference-section" aria-label="Справочник методов">
+        <ApiReferenceReact key={resolved} configuration={{
+          url: '/openapi/v1.json', withDefaultFonts: false, showDeveloperTools: 'never',
+          agent: { disabled: true }, hideClientButton: true, persistAuth: false,
+          defaultOpenAllTags: false, hideDarkModeToggle: true, forceDarkModeState: resolved,
+          authentication: { preferredSecurityScheme: 'Bearer' },
+        }} />
+      </section>
+    </div>}
+    <footer className="public-footer">Notify · v0.5.0 <a href="/">Кабинет Notify <Icon name="external" size={14} /></a></footer>
+  </div>;
+}
