@@ -1,0 +1,30 @@
+# docker compose --env-file <private-home.env> -f compose.yml -f compose.home.yml up -d
+services:
+  caddy:
+    image: caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    # The official binary carries this file capability; retaining it is required for exec.
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: '0.25'
+    environment:
+      NOTIFY_DOMAIN: notify.alxprgs.tech
+    ports: ['80:8080', '443:8443']
+    volumes:
+      - ./deploy/Caddyfile.home:/etc/caddy/Caddyfile:ro
+      - notify_caddy_data:/data
+      - notify_caddy_config:/config
+    tmpfs: ['/tmp:size=16m,mode=1777']
+    depends_on:
+      notify:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: '3'}
+volumes:
+  notify_caddy_data:
+  notify_caddy_config:

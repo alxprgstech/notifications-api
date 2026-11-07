@@ -1,0 +1,58 @@
+# ALXPRGS Notify
+
+Домашний запуск владельца и персональный APK: [HOME_HOSTING](docs/HOME_HOSTING.md).
+
+Личный сервис сообщений и подтверждений для программ и ИИ-агентов. Сервер .NET 10 объединяет REST API, MCP и фоновые задания; Android-клиент находится в соседнем `notifications-app`.
+
+## Состояние 0.5.0
+
+Реализованы сообщения, подтверждения да/нет/свой вариант, структурированные формы с подписью набора значений, голосовые сообщения Android ↔ агент с двухфазной загрузкой WAV, живые интернет-звонки в обе стороны (телефон → агент и агент → телефон с data-only FCM-приглашением), бинарный relay v2 с generation/barge-in, повышенные ответы с подписью устройства, SSO-привязка и восстановление, FCM HTTP v1, повторяемые подписанные webhooks, подключение агентов по исходящему WebSocket, кабинет, OpenAPI/Scalar, Python SDK и MCP HTTP/stdio.
+
+Проверки на настоящем Firebase, production SSO, физическом телефоне и реальном речевом провайдере агента требуют конфигурации владельца; наличие кода и локальных тестов их не заменяет. Актуальные результаты — [приёмка](docs/ACCEPTANCE.md).
+
+## Локальная сборка
+
+Нужны .NET SDK 10.0.401, Node 24.20.0 и Python 3.11+.
+
+```powershell
+dotnet restore Notify.sln --locked-mode
+dotnet test Notify.sln --no-restore -c Release
+cd web
+npm ci --ignore-scripts
+npm run build
+cd ..
+dotnet publish src/Notify.Server -c Release -o artifacts/server
+New-Item -ItemType Directory -Force artifacts/server/wwwroot
+Copy-Item web/dist/* artifacts/server/wwwroot -Recurse -Force
+```
+
+Если `wwwroot` отсутствует, сначала создайте его. Для локального сервера используйте отдельный каталог данных, не общий сетевой диск:
+
+```powershell
+$env:ASPNETCORE_ENVIRONMENT = 'Development'
+$env:ASPNETCORE_URLS = 'http://127.0.0.1:8085'
+$env:Notify__PublicUrl = 'http://127.0.0.1:8085'
+$env:Notify__DataPath = "$PWD/data"
+dotnet artifacts/server/Notify.Server.dll
+```
+
+Откройте `/docs`. Без SSO/Firebase `/health/ready` отвечает 503 с `configuration_required`; защищённые функции не получают обходного тестового входа. Для настоящего подключения следуйте [инструкции настройки](docs/OPERATIONS.md).
+
+```powershell
+python -m venv .venv
+.venv/Scripts/python -m pip install -c packages/python-sdk/requirements-test-lock.txt './packages/python-sdk[mcp]'
+.venv/Scripts/python -m unittest discover -s packages/python-sdk/tests -v
+```
+
+Передайте `NOTIFY_URL` и `NOTIFY_TOKEN` процессу агента через приватное окружение. Не вставляйте реальные значения в команды из истории терминала или переписку. Пример: `python examples/agent.py`; повышенный сценарий выбирается `NOTIFY_LEVEL=elevated`; форма — `python examples/form.py`.
+
+## Подключение
+
+- [Контракт API, MCP, SDK и webhook](docs/CONTRACT.md)
+- [Модель безопасности и SSO](docs/SECURITY.md)
+- [Развёртывание, резервное копирование и откат](docs/OPERATIONS.md)
+- [План завершения для DeepSeek Harness](docs/HARNESS_PLAN.md)
+
+Веб-кабинет использует SSO-cookie и CSRF. Отдельный токен интеграции создаётся только после подтверждения доверенным телефоном. SDK предназначен отправителям, он не умеет отвечать вместо пользователя.
+
+Лицензия на публичное распространение не предоставлена. CI готовит локальные/приватные артефакты и ничего не развёртывает.

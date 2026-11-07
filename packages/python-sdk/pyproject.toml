@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alxprgs-notify"
+version = "0.5.0"
+description = "Personal ALXPRGS Notify client and MCP stdio adapter"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["httpx==0.28.1"]
+
+[project.optional-dependencies]
+mcp = ["mcp==2.3.0"]
+agent = ["websockets==17.4"]
+
+[project.scripts]
+notify-mcp = "alxprgs_notify.mcp_stdio:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["alxprgs_notify*"]
