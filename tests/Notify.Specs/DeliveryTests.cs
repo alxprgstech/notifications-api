@@ -47,6 +47,35 @@ public sealed class DeliveryTests
         }
     }
     [Fact]
+    public async Task WebSessionUsesHttpsSchemeOnlyFromTrustedProxy()
+    {
+        using var app = new AppFactory { TrustedProxyNetwork = "192.0.2.0/24" };
+        var options = app.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>().Get("web");
+        var principal = new ClaimsPrincipal(new ClaimsIdentity([new Claim("sub", AppFactory.Owner)], "web"));
+        var ticket = new AuthenticationTicket(principal, new AuthenticationProperties { ExpiresUtc = DateTimeOffset.UtcNow.AddHours(1) }, "web");
+        var cookie = options.Cookie.Name + "=" + options.TicketDataFormat.Protect(ticket);
+
+        var trusted = await ReadSession("192.0.2.10");
+        Assert.Equal(200, trusted.Response.StatusCode);
+        Assert.Contains(trusted.Response.Headers.SetCookie, value =>
+            value != null && value.StartsWith("notify.csrf=", StringComparison.Ordinal) && value.Contains("; secure"));
+
+        var untrusted = await ReadSession("198.51.100.10");
+        Assert.Equal("http", untrusted.Request.Scheme);
+        Assert.DoesNotContain(untrusted.Response.Headers.SetCookie, value => value?.StartsWith("notify.csrf=", StringComparison.Ordinal) == true);
+
+        Task<Microsoft.AspNetCore.Http.HttpContext> ReadSession(string remoteAddress) => app.Server.SendAsync(context =>
+        {
+            context.Connection.RemoteIpAddress = IPAddress.Parse(remoteAddress);
+            context.Request.Method = "GET";
+            context.Request.Path = "/api/v1/session";
+            context.Request.Scheme = "http";
+            context.Request.Headers["X-Forwarded-Proto"] = "https";
+            context.Request.Headers.Cookie = cookie;
+        });
+    }
+
+    [Fact]
     public async Task WebManagementRequiresCsrfOriginAndPhoneAndShowsTokenOnce()
     {
         using var app = new AppFactory(); var (_, phone, key) = app.Device(); using (key)

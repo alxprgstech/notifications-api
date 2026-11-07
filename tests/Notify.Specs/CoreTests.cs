@@ -19,6 +19,7 @@ public sealed class AppFactory : WebApplicationFactory<Program>
 {
     public string Root { get; } = Path.Combine(AppContext.BaseDirectory, "artifacts", Wire.Id());
     public string Issuer { get; set; } = "https://auth.alxprgs.tech";
+    public string? TrustedProxyNetwork { get; set; }
     public string? WebhookReceiver { get; set; }
     public int DailyLimit { get; set; } = 2000;
     public int AgentHeartbeatSeconds { get; set; } = 30;
@@ -44,7 +45,7 @@ public sealed class AppFactory : WebApplicationFactory<Program>
         }));
         builder.ConfigureServices(services =>
         {
-            services.RemoveAll<Settings>(); services.AddSingleton(new Settings { DataPath = Root, PublicUrl = "https://localhost", OwnerSub = Owner, WebClientSecret = "synthetic-client-secret-not-a-real-credential", SsoIssuer = Issuer, WebhookHosts = ["fixture.test"], SourceDailyLimit = DailyLimit, AgentHeartbeatSeconds = AgentHeartbeatSeconds, AgentOfflineSeconds = AgentOfflineSeconds, AgentSendTimeoutSeconds = AgentSendTimeoutSeconds, AudioQuotaBytes = AudioQuotaBytes, AudioMessageTtlDays = AudioMessageTtlDays, CallRingSeconds = CallRingSeconds, CallMediaConnectSeconds = CallMediaConnectSeconds, CallQueueFrames = CallQueueFrames });
+            services.RemoveAll<Settings>(); services.AddSingleton(new Settings { DataPath = Root, PublicUrl = "https://localhost", OwnerSub = Owner, WebClientSecret = "synthetic-client-secret-not-a-real-credential", SsoIssuer = Issuer, TrustedProxyNetwork = TrustedProxyNetwork, WebhookHosts = ["fixture.test"], SourceDailyLimit = DailyLimit, AgentHeartbeatSeconds = AgentHeartbeatSeconds, AgentOfflineSeconds = AgentOfflineSeconds, AgentSendTimeoutSeconds = AgentSendTimeoutSeconds, AudioQuotaBytes = AudioQuotaBytes, AudioMessageTtlDays = AudioMessageTtlDays, CallRingSeconds = CallRingSeconds, CallMediaConnectSeconds = CallMediaConnectSeconds, CallQueueFrames = CallQueueFrames });
             foreach (var registration in services.Where(d => d.ImplementationType == typeof(DeliveryWorker)).ToList()) services.Remove(registration);
             if (PushSender != null) { services.RemoveAll<IPushSender>(); services.AddSingleton(PushSender); }
             if (WebhookReceiver != null) services.AddHttpClient("webhook").ConfigurePrimaryHttpMessageHandler(() => new FixtureForwarder(WebhookReceiver));

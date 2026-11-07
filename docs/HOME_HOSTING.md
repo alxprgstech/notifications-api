@@ -16,6 +16,8 @@ curl.exe --fail https://notify.alxprgs.tech/health/ready
 
 API доступен только на host loopback 8085. Caddy публикует HTTP/HTTPS, автоматически получает/обновляет TLS и проксирует WebSocket/MCP. Access log отключён; URI и чувствительные заголовки исключены из error logs. Данные и сертификаты находятся в постоянных Docker volumes. Не используйте `down -v` для обновления.
 
+Для веб-сессии укажите в `home.env` параметр `Notify__TrustedProxyNetwork` с CIDR отдельной сети Compose, в которой работают Caddy и Notify. Узнать текущую подсеть можно командой `docker network inspect alxprgs-notify_default --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`. После пересоздания сети проверьте CIDR перед запуском Notify. Приложение принимает `X-Forwarded-Proto` только от этой сети и выпускает CSRF-cookie с атрибутом `Secure`.
+
 `restart: unless-stopped` действует после запуска Docker engine. Для постоянной доступности нужны работающий ПК без сна и автозапуск Docker Desktop при входе владельца. Эти настройки Windows автоматически не менялись.
 
 ## Приватные файлы

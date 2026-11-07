@@ -3,12 +3,14 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
@@ -28,12 +30,28 @@ public sealed class FakeSso : IAsyncDisposable
     public string Issuer { get; private set; } = "";
     public bool TamperHash { get; set; }
     public string LastState { get; private set; } = "";
+    public string? WebCodeChallenge { get; set; }
+    public string? WebNonce { get; set; }
     public List<(string body, string timestamp, string signature, string eventId)> Webhooks { get; } = [];
     public async Task Start()
     {
         var builder = WebApplication.CreateBuilder(); builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0"); app = builder.Build();
         app.MapGet("/.well-known/openid-configuration", () => new { issuer = Issuer, jwks_uri = Issuer + "/keys", authorization_endpoint = Issuer + "/oauth/authorize", token_endpoint = Issuer + "/oauth/token", response_types_supported = new[] { "code" }, subject_types_supported = new[] { "public" }, id_token_signing_alg_values_supported = new[] { "RS256" } });
         app.MapGet("/keys", () => { var key = rsa.ExportParameters(false); return Results.Json(new { keys = new[] { new { kty = "RSA", kid = "fixture-key", use = "sig", alg = "RS256", n = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(key.Modulus!), e = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(key.Exponent!) } } }); });
+        app.MapPost("/oauth/token", async (HttpContext c) =>
+        {
+            var form = await c.Request.ReadFormAsync();
+            var challenge = WebEncoders.Base64UrlEncode(SHA256.HashData(Encoding.ASCII.GetBytes(form["code_verifier"].ToString())));
+            if (WebNonce is null || challenge != WebCodeChallenge || form["code"] != "fixture-code" ||
+                form["redirect_uri"] != "https://localhost/signin-oidc")
+                return Results.BadRequest();
+            return Results.Json(new
+            {
+                token_type = "Bearer",
+                access_token = Token("notify-web"),
+                id_token = Token("notify-web", "id_token", [new Claim("nonce", WebNonce)])
+            });
+        });
         app.MapPost("/api/v1/step-up/requests", async (HttpContext c) =>
         {
             if (!c.Request.Headers.Authorization.ToString().StartsWith("Basic ", StringComparison.Ordinal)) return Results.Unauthorized();
@@ -62,6 +80,39 @@ public sealed class FakeSso : IAsyncDisposable
 }
 public sealed class SsoTests
 {
+    [Fact]
+    public async Task WebLoginUsesShortBrowserBoundStateAndCompletesPkce()
+    {
+        await using var sso = new FakeSso(); await sso.Start();
+        using var app = new AppFactory { Issuer = sso.Issuer };
+        using var browser = app.Client();
+        using var start = await browser.GetAsync("/auth/login");
+        Assert.Equal(HttpStatusCode.Redirect, start.StatusCode);
+        var query = QueryHelpers.ParseQuery(start.Headers.Location!.Query);
+        var state = query["state"].ToString();
+        Assert.Matches("^[A-Za-z0-9_-]{43}$", state);
+        Assert.Equal("S256", query["code_challenge_method"].ToString());
+        Assert.Contains(start.Headers.GetValues("Set-Cookie"), cookie =>
+            cookie.StartsWith("notify.oidc.state.", StringComparison.Ordinal) && cookie.Contains("path=/signin-oidc") &&
+            cookie.Contains("httponly") && cookie.Contains("secure") && cookie.Contains("samesite=lax"));
+        sso.WebCodeChallenge = query["code_challenge"].ToString();
+        sso.WebNonce = query["nonce"].ToString();
+        var callback = QueryHelpers.AddQueryString("/signin-oidc?code=fixture-code", "state", state);
+
+        using var otherBrowser = app.Client();
+        using var missingCookie = await otherBrowser.GetAsync(callback);
+        Assert.Equal(HttpStatusCode.Unauthorized, missingCookie.StatusCode);
+        using var wrongState = await browser.GetAsync(QueryHelpers.AddQueryString("/signin-oidc?code=fixture-code", "state", Wire.Secret()));
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongState.StatusCode);
+        using var completed = await browser.GetAsync(callback);
+        Assert.Equal(HttpStatusCode.Redirect, completed.StatusCode);
+        Assert.Equal("/", completed.Headers.Location!.OriginalString);
+        using var session = await browser.GetAsync("/api/v1/session");
+        Assert.Equal(HttpStatusCode.OK, session.StatusCode);
+        using var replay = await browser.GetAsync(callback);
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+    }
+
     [Theory]
     [InlineData(3, true)]
     [InlineData(60, false)]

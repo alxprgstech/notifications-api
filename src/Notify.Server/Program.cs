@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -64,6 +65,14 @@ builder.Services.AddOpenApi(o =>
 });
 builder.Services.AddMcpServer().WithHttpTransport().WithTools<NotifyTools>();
 var secureCookies = new Uri(settings.PublicUrl).Scheme == "https";
+builder.Services.AddOptions<ForwardedHeadersOptions>().Configure<Settings>((o, config) =>
+{
+    if (string.IsNullOrEmpty(config.TrustedProxyNetwork)) return;
+    o.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+    o.KnownProxies.Clear();
+    o.KnownIPNetworks.Clear();
+    o.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(config.TrustedProxyNetwork));
+});
 builder.Services.AddAntiforgery(o => { o.HeaderName = "X-CSRF-Token"; o.Cookie.Name = "notify.csrf"; o.Cookie.SecurePolicy = secureCookies ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest; o.Cookie.SameSite = SameSiteMode.Strict; });
 builder.Services.AddAuthentication(o => { o.DefaultScheme = "local"; o.DefaultChallengeScheme = "local"; })
     .AddScheme<AuthenticationSchemeOptions, LocalAuthentication>("local", _ => { })
@@ -89,6 +98,10 @@ builder.Services.AddAuthentication(o => { o.DefaultScheme = "local"; o.DefaultCh
         };
         o.Events.OnRemoteFailure = c => { c.HandleResponse(); c.Response.StatusCode = 401; return c.Response.WriteAsJsonAsync(new { code = "sso_login_failed" }); };
     });
+builder.Services.AddOptions<CookieAuthenticationOptions>("web").Configure<IDataProtectionProvider>((o, protection) =>
+    o.TicketDataFormat = new TicketDataFormat(protection.CreateProtector("Notify.WebSession.v2")));
+builder.Services.AddOptions<OpenIdConnectOptions>("sso").Configure<IHttpContextAccessor, IDataProtectionProvider>((o, http, protection) =>
+    o.StateDataFormat = new WebLoginState(http, protection, o.CallbackPath, o.RemoteAuthenticationTimeout, secureCookies));
 builder.Services.AddAuthorization();
 builder.Services.AddRateLimiter(o =>
 {
@@ -100,6 +113,7 @@ settings = app.Services.GetRequiredService<Settings>(); settings.Validate(app.En
 _ = app.Services.GetRequiredService<Database>();
 _ = app.Services.GetRequiredService<CallService>();
 if (args.Length == 2 && args[0] == "backup") { app.Services.GetRequiredService<Database>().Backup(args[1]); return; }
+if (!string.IsNullOrEmpty(settings.TrustedProxyNetwork)) app.UseForwardedHeaders();
 app.Use(async (context, next) =>
 {
     context.Response.Headers.XContentTypeOptions = "nosniff"; context.Response.Headers["Referrer-Policy"] = "no-referrer";

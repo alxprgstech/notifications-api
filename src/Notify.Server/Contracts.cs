@@ -76,6 +76,7 @@ public sealed class Settings
     public string WebClientSecret { get; init; } = "";
     public string AndroidClientId { get; init; } = "notify-android";
     public string? FirebaseCredentials { get; init; }
+    public string? TrustedProxyNetwork { get; init; }
     public string[] WebhookHosts { get; init; } = [];
     public string[] AndroidSigningFingerprints { get; init; } = [];
     public int RetentionDays { get; init; } = 30;
@@ -100,6 +101,9 @@ public sealed class Settings
                 throw new InvalidOperationException("PublicUrl/SsoIssuer must be HTTPS origins (loopback HTTP only in Development)");
         }
         if (!development && !SsoConfigured) throw new InvalidOperationException("Configure owner and SSO client before production startup");
+        if (!string.IsNullOrEmpty(TrustedProxyNetwork) &&
+            (!System.Net.IPNetwork.TryParse(TrustedProxyNetwork, out var network) || network.PrefixLength == 0))
+            throw new InvalidOperationException("TrustedProxyNetwork must be an explicit proxy CIDR");
         if (RetentionDays != 30) throw new InvalidOperationException("RetentionDays must be 30 for contract v1");
         if (SourceDailyLimit is < 1 or > 100000) throw new InvalidOperationException("Invalid SourceDailyLimit");
         if (AgentHeartbeatSeconds is < 1 or > 60 || AgentOfflineSeconds < AgentHeartbeatSeconds * 2 || AgentOfflineSeconds > 600 || AgentSendTimeoutSeconds is < 1 or > 30) throw new InvalidOperationException("Invalid agent heartbeat/offline limits");
