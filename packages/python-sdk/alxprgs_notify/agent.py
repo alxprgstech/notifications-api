@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 import websockets
 
-from .client import _url
+from .client import AsyncNotifyClient, _url
 
 PROTOCOL = "alxprgs.notify.agent.v1"
 CALL_PROTOCOL = "alxprgs.notify.call.v2"
@@ -282,7 +282,12 @@ class AgentConnector:
     def call_protocol(self) -> str | None:
         return self._call_protocol
 
-    async def dial_call(self, session_id: str | None = None, security_level: str = "standard", title: str | None = None, timeout: float = 10) -> dict[str, Any]:
+    async def upload_icon(self, data: bytes) -> str:
+        """Save a PNG or WebP on Notify and return its reusable icon ID."""
+        async with AsyncNotifyClient(self._base, self._token) as client:
+            return await client.upload_icon(data)
+
+    async def dial_call(self, session_id: str | None = None, security_level: str = "standard", title: str | None = None, timeout: float = 10, *, icon_id: str | None = None) -> dict[str, Any]:
         """Ask the server to ring the owner. Does not open a microphone."""
         if self._call_protocol != CALL_PROTOCOL:
             raise NotifyCallError("call_protocol_unsupported")
@@ -292,6 +297,8 @@ class AgentConnector:
             raise ValueError("Invalid session id")
         if title is not None and len(title) > 160:
             raise ValueError("Title is too long")
+        if icon_id is not None and (not isinstance(icon_id, str) or len(icon_id) != 64 or any(c not in "0123456789abcdef" for c in icon_id)):
+            raise ValueError("Invalid icon id")
         if self._control is None:
             raise RuntimeError("agent is not connected")
         request_id = _event(); loop = asyncio.get_running_loop(); waiter = loop.create_future(); self._dial_waiters[request_id] = waiter
@@ -299,6 +306,7 @@ class AgentConnector:
             payload: dict[str, Any] = {"securityLevel": security_level}
             if session_id is not None: payload["sessionId"] = session_id
             if title is not None: payload["title"] = title
+            if icon_id is not None: payload["iconId"] = icon_id
             await self._send_call("call.dial", payload, event_id=request_id)
             result = await asyncio.wait_for(waiter, timeout)
         finally:

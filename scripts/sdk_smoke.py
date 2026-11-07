@@ -34,7 +34,7 @@ schema=(ROOT/"src/Notify.Server/Database.cs").read_text(encoding="utf-8").split(
 data=run/"data";data.mkdir()
 with sqlite3.connect(data/"notify.db") as db:
     db.executescript(schema)
-    db.execute("INSERT INTO objects VALUES(?,?,?)",("source",source,json.dumps(dict(id=source,name="Synthetic SDK smoke",scopes=["notify:send","requests:create","requests:read","requests:cancel","agents:connect"],preview="hidden",revoked=False))))
+    db.execute("INSERT INTO objects VALUES(?,?,?)",("source",source,json.dumps(dict(id=source,name="Synthetic SDK smoke",scopes=["notify:send","requests:create","requests:read","requests:cancel","agents:connect","icons:write"],preview="hidden",revoked=False))))
     db.execute("INSERT INTO objects VALUES(?,?,?)",("device",device,json.dumps(dict(id=device,name="Software signing fixture",publicKey=base64.b64encode(key.public_key().public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo)).decode(),revoked=False))))
     db.execute("INSERT INTO objects VALUES(?,?,?)",("agent",agent_id,json.dumps(dict(id=agent_id,sourceId=source,name="Synthetic smoke agent",capabilities=["text_tasks"],createdAt=int(time.time()*1000),lastSeenAt=None,revoked=False))))
     db.execute("INSERT INTO agent_commands(id,agent_id,source_id,type,payload,created,expires,status,attempts) VALUES(?,?,?,?,?,?,?,'queued',0)",(command_id,agent_id,source,"task",json.dumps(dict(taskId="smoke-task")),int(time.time()*1000),int(time.time()*1000)+600000))
@@ -158,10 +158,18 @@ try:
                     await asyncio.wait_for(call_done.wait(),timeout=8)
                     history=(await phone_api.get("/api/v1/calls")).json();assert history[0]["id"]==call_id and history[0]["reason"]=="ended",history[0]
                     call_state.update(seen)
-                incoming=await connector.dial_call(session_id="smoke-task",title="Smoke callback")
+                avatar = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aSgAAAABJRU5ErkJggg==")
+                avatar_id = await connector.upload_icon(avatar)
+                incoming=await connector.dial_call(session_id="smoke-task",title="Smoke callback",icon_id=avatar_id)
                 incoming_id=incoming["callId"]; call_state["incoming"]=incoming_id
                 invite=(await phone_api.get("/api/v1/calls/incoming")).json();assert invite["id"]==incoming_id and invite["direction"]=="incoming",invite
-                await phone_api.post("/api/v1/calls/"+incoming_id+"/accept",json={})
+                assert invite["iconId"] == avatar_id
+                image = await phone_api.get("/api/v1/icons/" + avatar_id)
+                image.raise_for_status()
+                assert image.content == avatar
+                reply = await phone_api.post("/api/v1/calls/"+incoming_id+"/accept",json={})
+                reply.raise_for_status()
+                assert reply.json()["iconId"] == avatar_id
                 accepted=await connector.wait_call(incoming_id,timeout=8);assert accepted.get("deviceId"),accepted
                 async with connector.call_audio(incoming_id) as agent_audio:
                     async with websockets.connect(("ws://"+origin.split("//",1)[1]+f"/api/v1/calls/{incoming_id}/audio"),additional_headers={"Authorization":"Bearer "+device_token},ping_interval=20) as incoming_media:

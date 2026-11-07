@@ -27,7 +27,7 @@ public sealed class CallService
         agents.ControlEvent += HandleAgentFrame; agents.DisconnectedEvent += HandleAgentDisconnected;
     }
 
-    private sealed class Call(string id, string inviteId, string direction, string sourceId, string agentId, string agentName, string? deviceId, string? sessionId, string securityLevel, string title)
+    private sealed class Call(string id, string inviteId, string direction, string sourceId, string agentId, string agentName, string? deviceId, string? sessionId, string securityLevel, string title, string? iconId)
     {
         public string Id { get; } = id;
         public string InviteId { get; } = inviteId;
@@ -39,6 +39,7 @@ public sealed class CallService
         public string? SessionId { get; } = sessionId;
         public string SecurityLevel { get; } = securityLevel;
         public string Title { get; } = title;
+        public string? IconId { get; } = iconId;
         public long StartedAt { get; } = Wire.Now; public long? ActiveAt, EndedAt; public string Status = "ringing"; public string? Reason;
         public int PlaybackGeneration;
         public bool Ended; public CancellationTokenSource Cts { get; } = new(); public MediaSide? Phone, AgentMedia;
@@ -118,11 +119,12 @@ public sealed class CallService
         lock (sync) { if (currentId != null) throw new Fault(409, "busy"); }
         if (input.SecurityLevel == "elevated") VerifyChallenge(actor, input.ChallengeId, input.Signature, "outgoing", "start", input.SourceId, agent.Id, input.SessionId, null, null, "elevated");
         else if (input.ChallengeId != null || input.Signature != null) throw new Fault(400, "invalid_call");
+        var iconId = ResolveIcon(input.SourceId, null);
         Call call;
         lock (sync)
         {
             if (currentId != null) throw new Fault(409, "busy");
-            call = new Call(Wire.Id(), Wire.Id(), "outgoing", input.SourceId, agent.Id, online.Agent.Name, actor.Id, input.SessionId, input.SecurityLevel, "Звонок");
+            call = new Call(Wire.Id(), Wire.Id(), "outgoing", input.SourceId, agent.Id, online.Agent.Name, actor.Id, input.SessionId, input.SecurityLevel, "Звонок", iconId);
             calls[call.Id] = call; currentId = call.Id;
         }
         _ = RingTimerAsync(call);
@@ -184,12 +186,26 @@ public sealed class CallService
         {
             await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "invalid_session" }); return;
         }
+        string? requestedIcon = null;
+        if (payload.TryGetProperty("iconId", out var iconValue))
+        {
+            requestedIcon = iconValue.ValueKind == JsonValueKind.String ? iconValue.GetString() : null;
+            if (requestedIcon is not { Length: 64 } || !requestedIcon.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+            {
+                await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "invalid_call" }); return;
+            }
+        }
+        var iconId = ResolveIcon(agent.SourceId, requestedIcon);
+        if (requestedIcon != null && iconId == null)
+        {
+            await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "icon_not_found" }); return;
+        }
         Call? call = null;
         lock (sync)
         {
             if (currentId == null)
             {
-                call = new Call(Wire.Id(), Wire.Id(), "incoming", agent.SourceId, agent.Id, online.Value.Agent.Name, null, sessionId, security, string.IsNullOrWhiteSpace(title) ? online.Value.Agent.Name : title);
+                call = new Call(Wire.Id(), Wire.Id(), "incoming", agent.SourceId, agent.Id, online.Value.Agent.Name, null, sessionId, security, string.IsNullOrWhiteSpace(title) ? online.Value.Agent.Name : title, iconId);
                 calls[call.Id] = call; currentId = call.Id;
             }
         }
@@ -510,11 +526,18 @@ public sealed class CallService
         });
     }
 
+    private string? ResolveIcon(string sourceId, string? requestedIcon) => db.Run((c, t) =>
+    {
+        if (requestedIcon == null) return Get<Source>(c, t, "source", sourceId)?.IconId;
+        var icon = Get<Icon>(c, t, "icon", requestedIcon);
+        return icon != null && (icon.SourceId == null || icon.SourceId == sourceId) ? icon.Id : null;
+    });
+
     private long RingDeadline(Call call) => call.StartedAt + settings.CallRingSeconds * 1000L;
     private object View(Call call) => new
     {
         call.Id, call.InviteId, call.Direction, call.Status, call.Reason, call.SourceId, call.AgentId, call.AgentName, call.SessionId, call.SecurityLevel,
-        call.DeviceId, call.StartedAt, call.ActiveAt, call.EndedAt, call.Title, expiresAt = RingDeadline(call)
+        call.DeviceId, call.StartedAt, call.ActiveAt, call.EndedAt, call.Title, call.IconId, expiresAt = RingDeadline(call)
     };
     private static void RequireParticipant(Actor actor, Call call)
     {

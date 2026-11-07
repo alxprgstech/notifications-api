@@ -88,7 +88,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 for _ in range(100):
                     if connector._control is not None: break
                     await asyncio.sleep(0.02)
-                ack = await connector.dial_call(session_id="task-1", security_level="elevated", title="Callback")
+                ack = await connector.dial_call(session_id="task-1", security_level="elevated", title="Callback", icon_id="a" * 64)
                 self.assertEqual(ack["callId"], call_id); self.assertEqual(ack["status"], "ringing")
                 event = await connector.wait_call(call_id, timeout=5)
                 self.assertEqual(event["deviceName"], "Pixel")
@@ -99,6 +99,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await connector.stop(); task.cancel(); await asyncio.gather(task, return_exceptions=True)
         self.assertEqual(control_events[0]["type"], "call.dial"); self.assertEqual(control_events[0]["payload"]["sessionId"], "task-1"); self.assertEqual(control_events[0]["payload"]["securityLevel"], "elevated")
+        self.assertEqual(control_events[0]["payload"]["iconId"], "a" * 64)
         self.assertEqual(control_events[1]["type"], "call.dial")
 
     async def test_old_agent_without_call_protocol_keeps_non_voice_commands(self):

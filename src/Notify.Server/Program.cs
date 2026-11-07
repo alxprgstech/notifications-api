@@ -240,8 +240,18 @@ api.MapPost("/icons", async (HttpContext c, Database db, CancellationToken ct) =
     var directory = Path.Combine(settings.DataPath, "icons"); Directory.CreateDirectory(directory);
     db.Run((cn, t) =>
     {
-        if (Get<Icon>(cn, t, "icon", id) == null && long.Parse(Rows(cn, t, "SELECT CAST(count(*) AS TEXT) FROM objects WHERE kind='icon'")[0], System.Globalization.CultureInfo.InvariantCulture) >= 256) throw new Fault(409, "icon_quota_exceeded");
-        File.WriteAllBytes(Path.Combine(directory, file), bytes); Put(cn, t, "icon", id, new Icon(id, actor.IsOwner ? null : actor.Id, type, file)); return 0;
+        var existing = Get<Icon>(cn, t, "icon", id);
+        var target = Path.Combine(directory, file);
+        if (existing != null && File.Exists(target)) return 0;
+        if (existing == null && long.Parse(Rows(cn, t, "SELECT CAST(count(*) AS TEXT) FROM objects WHERE kind='icon'")[0], System.Globalization.CultureInfo.InvariantCulture) >= 256) throw new Fault(409, "icon_quota_exceeded");
+        var temporary = target + "." + Wire.Id() + ".tmp";
+        try
+        {
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, target, overwrite: true);
+        }
+        finally { File.Delete(temporary); }
+        Put(cn, t, "icon", id, new Icon(id, actor.IsOwner ? null : actor.Id, type, file)); return 0;
     }); return new { id };
 });
 api.MapGet("/icons/{id}", (string id, HttpContext c, Database db) =>

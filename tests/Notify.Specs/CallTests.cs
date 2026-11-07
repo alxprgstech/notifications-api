@@ -143,13 +143,66 @@ public sealed class CallTests
     }
     private static void SetFcm(AppFactory app, string deviceId, string token)
         => app.Services.GetRequiredService<Database>().Run((c, t) => { var device = Get<Device>(c, t, "device", deviceId)!; Put(c, t, "device", device.Id, device with { FcmToken = token }); return 0; });
-    private static async Task<JsonElement> Dial(WebSocket control, string sessionId = "task-1", string securityLevel = "standard")
+    private static async Task<JsonElement> Dial(WebSocket control, string sessionId = "task-1", string securityLevel = "standard", string? iconId = null)
     {
         var requestId = Wire.Id();
-        await SendText(control, new { type = "call.dial", protocolVersion = CallService.Protocol, eventId = requestId, payload = new { sessionId, securityLevel, title = "Входящий звонок" } });
+        var payload = new Dictionary<string, string> { ["sessionId"] = sessionId, ["securityLevel"] = securityLevel, ["title"] = "Входящий звонок" };
+        if (iconId != null) payload["iconId"] = iconId;
+        await SendText(control, new { type = "call.dial", protocolVersion = CallService.Protocol, eventId = requestId, payload });
         using var document = JsonDocument.Parse(Wire.Encode(await ReceiveJson(control)));
         Assert.Equal("call.dial_ack", document.RootElement.GetProperty("type").GetString()); Assert.Equal(requestId, document.RootElement.GetProperty("payload").GetProperty("requestEventId").GetString());
         return document.RootElement.GetProperty("payload").Clone();
+    }
+
+    [Theory]
+    [InlineData("agent")]
+    [InlineData("owner")]
+    [InlineData("source-default")]
+    public async Task CallIconUsesStoredImageAndRejectsOtherSources(string selection)
+    {
+        using var app = new AppFactory();
+        var (integration, source) = app.Integration(scopes: ["agents:connect", "icons:write"]);
+        var (foreign, _) = app.Integration();
+        var (phone, _, key) = app.Device();
+        using (integration) using (foreign) using (phone) using (key)
+        {
+            var png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aSgAAAABJRU5ErkJggg==");
+            async Task<string> Upload(HttpClient client)
+            {
+                using var body = new ByteArrayContent(png);
+                using var response = await client.PostAsync("/api/v1/icons", body);
+                response.EnsureSuccessStatusCode();
+                return (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!;
+            }
+            var owned = await Upload(integration);
+            Assert.Equal(owned, await Upload(integration));
+            var other = await Upload(foreign);
+            var shared = await Upload(phone);
+            Assert.NotEqual(owned, other);
+            app.Services.GetRequiredService<Database>().Run((c, t) =>
+            {
+                var stored = Get<Source>(c, t, "source", source.Id)!;
+                Put(c, t, "source", source.Id, stored with { IconId = shared });
+                return 0;
+            });
+            var agent = RegisterAgent(app, source.Id);
+            using var control = await ConnectAgent(app, Token(integration), agent);
+            Assert.Equal("invalid_call", (await Dial(control, iconId: "../icon")).GetProperty("code").GetString());
+            Assert.Equal("icon_not_found", (await Dial(control, iconId: other)).GetProperty("code").GetString());
+            Assert.Equal("icon_not_found", (await Dial(control, iconId: new string('0', 64))).GetProperty("code").GetString());
+
+            var requested = selection switch { "agent" => owned, "owner" => shared, _ => null };
+            var expected = requested ?? shared;
+            var ack = await Dial(control, iconId: requested);
+            Assert.True(ack.GetProperty("ok").GetBoolean());
+            var callId = ack.GetProperty("callId").GetString();
+            using var incoming = JsonDocument.Parse(await phone.GetStringAsync("/api/v1/calls/incoming"));
+            Assert.Equal(expected, incoming.RootElement.GetProperty("iconId").GetString());
+            Assert.Equal(png, await phone.GetByteArrayAsync($"/api/v1/icons/{expected}"));
+            using var accepted = await phone.PostAsJsonAsync($"/api/v1/calls/{callId}/accept", new { });
+            accepted.EnsureSuccessStatusCode();
+            Assert.Equal(expected, (await accepted.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("iconId").GetString());
+        }
     }
 
     [Fact]
