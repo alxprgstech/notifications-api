@@ -52,16 +52,34 @@ public sealed class FakeSso : IAsyncDisposable
         app.MapPost("/events", async (HttpContext c) => { using var r = new StreamReader(c.Request.Body); Webhooks.Add((await r.ReadToEndAsync(), c.Request.Headers["X-Notify-Timestamp"].ToString(), c.Request.Headers["X-Notify-Signature"].ToString(), c.Request.Headers["X-Notify-Event-Id"].ToString())); return Results.StatusCode(Webhooks.Count == 1 ? 500 : 200); });
         await app.StartAsync(); Issuer = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
     }
-    public string Token(string audience = "notify-android", string use = "access_token", IEnumerable<Claim>? extra = null)
+    public string Token(string audience = "notify-android", string use = "access_token", IEnumerable<Claim>? extra = null, int clockOffsetSeconds = 0)
     {
         var claims = new List<Claim> { new("sub", AppFactory.Owner), new("token_use", use), new("iat", DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64) };
         if (extra != null) claims.AddRange(extra);
-        return new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(Issuer, audience, claims, DateTime.UtcNow.AddSeconds(-1), DateTime.UtcNow.AddMinutes(5), new SigningCredentials(new RsaSecurityKey(rsa) { KeyId = "fixture-key" }, "RS256")));
+        return new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(Issuer, audience, claims, DateTime.UtcNow.AddSeconds(clockOffsetSeconds - 1), DateTime.UtcNow.AddSeconds(clockOffsetSeconds + 300), new SigningCredentials(new RsaSecurityKey(rsa) { KeyId = "fixture-key" }, "RS256")));
     }
     public async ValueTask DisposeAsync() { await app.DisposeAsync(); rsa.Dispose(); }
 }
 public sealed class SsoTests
 {
+    [Theory]
+    [InlineData(3, true)]
+    [InlineData(60, false)]
+    [InlineData(-600, false)]
+    public async Task TokenClockToleranceIsSmallAndBounded(int offset, bool accepted)
+    {
+        await using var sso = new FakeSso(); await sso.Start();
+        using var app = new AppFactory { Issuer = sso.Issuer };
+        var client = app.Services.GetRequiredService<SsoClient>();
+        var token = sso.Token(clockOffsetSeconds: offset);
+        if (accepted) _ = await client.Validate(token, "notify-android", "access_token", CancellationToken.None);
+        else
+        {
+            var error = await Assert.ThrowsAsync<Fault>(() => client.Validate(token, "notify-android", "access_token", CancellationToken.None));
+            Assert.Equal("invalid_sso_token", error.Code);
+        }
+    }
+
     [Fact]
     public async Task EnrollmentRecoveryUsesBoundRedeemedPasswordMfaProof()
     {

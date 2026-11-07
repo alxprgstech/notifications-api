@@ -14,6 +14,8 @@ Android создаёт ключ подписи в Keystore с `setUserAuthentica
 
 ## Первичная привязка и восстановление
 
+Для временных claims подписанных SSO JWT используется ограниченный допуск часов 5 секунд (также для веб-входа). Это учитывает небольшую рассинхронизацию разных хостов; локальные сроки enrollment, challenge, state и решений остаются строгими. При отклонении JWT журнал содержит только класс ошибки валидации, без токена, claims и текста исключения.
+
 1. Android проходит Authorization Code + PKCE через системный браузер как public client. Секрета confidential client в APK нет.
 2. Сервер проверяет RS256, issuer/JWKS, audience Android-клиента, срок, sub владельца и `token_use=access_token`. ID token вместо access token отклоняется.
 3. Сервер сохраняет enrollment, ключ телефона и recovery-флаг; создаёт external step-up от confidential web-клиента с `reauth_password_mfa`.

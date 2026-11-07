@@ -13,13 +13,16 @@ namespace Notify;
 
 public sealed class SsoClient
 {
+    // Separate hosts can differ by a few seconds; local request/proof deadlines remain strict.
+    public static readonly TimeSpan TokenClockSkew = TimeSpan.FromSeconds(5);
     private readonly Settings settings;
     private readonly Database db;
     private readonly IHttpClientFactory http;
+    private readonly ILogger<SsoClient> logger;
     private readonly ConfigurationManager<OpenIdConnectConfiguration> metadata;
-    public SsoClient(Settings settings, Database db, IHttpClientFactory http, IHostEnvironment environment)
+    public SsoClient(Settings settings, Database db, IHttpClientFactory http, IHostEnvironment environment, ILogger<SsoClient> logger)
     {
-        this.settings = settings; this.db = db; this.http = http;
+        this.settings = settings; this.db = db; this.http = http; this.logger = logger;
         metadata = new ConfigurationManager<OpenIdConnectConfiguration>(settings.SsoIssuer + "/.well-known/openid-configuration", new OpenIdConnectConfigurationRetriever(), new HttpDocumentRetriever(http.CreateClient("sso")) { RequireHttps = !environment.IsDevelopment() });
     }
     public async Task<JwtSecurityToken> Validate(string token, string audience, string use, CancellationToken ct)
@@ -28,7 +31,7 @@ public sealed class SsoClient
         OpenIdConnectConfiguration configuration;
         try { configuration = await metadata.GetConfigurationAsync(ct); }
         catch (Exception e) when (e is InvalidOperationException or HttpRequestException) { throw new Fault(503, "sso_metadata_unavailable"); }
-        var validation = new TokenValidationParameters { ValidIssuer = settings.SsoIssuer, ValidAudience = audience, IssuerSigningKeys = configuration.SigningKeys, ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, RequireExpirationTime = true, RequireSignedTokens = true, ValidateIssuerSigningKey = true, ValidAlgorithms = ["RS256"], ClockSkew = TimeSpan.Zero };
+        var validation = new TokenValidationParameters { ValidIssuer = settings.SsoIssuer, ValidAudience = audience, IssuerSigningKeys = configuration.SigningKeys, ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, RequireExpirationTime = true, RequireSignedTokens = true, ValidateIssuerSigningKey = true, ValidAlgorithms = ["RS256"], ClockSkew = TokenClockSkew };
         try
         {
             var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
@@ -37,7 +40,12 @@ public sealed class SsoClient
             return jwt;
         }
         catch (SecurityTokenSignatureKeyNotFoundException) { metadata.RequestRefresh(); throw new Fault(401, "sso_signing_key_changed_retry"); }
-        catch (SecurityTokenException) { throw new Fault(401, "invalid_sso_token"); }
+        catch (SecurityTokenException error)
+        {
+            // Log only the category: exception messages can contain JWTs or private claims.
+            logger.LogWarning("SSO token rejected: {Category}", error.GetType().Name);
+            throw new Fault(401, "invalid_sso_token");
+        }
     }
     private static string? Text(JwtSecurityToken jwt, string key) => jwt.Payload.TryGetValue(key, out var value) ? value as string : null;
     public async Task<object> StartEnrollment(EnrollDevice input, string accessToken, NotificationService service, CancellationToken ct)

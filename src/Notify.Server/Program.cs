@@ -77,7 +77,7 @@ builder.Services.AddAuthentication(o => { o.DefaultScheme = "local"; o.DefaultCh
     {
         o.Authority = settings.SsoIssuer; o.ClientId = settings.WebClientId; o.ClientSecret = settings.WebClientSecret; o.ResponseType = "code"; o.ResponseMode = "query"; o.UsePkce = true; o.SaveTokens = false; o.SignInScheme = "web"; o.MapInboundClaims = false;
         o.RequireHttpsMetadata = !builder.Environment.IsDevelopment(); o.Scope.Clear(); o.Scope.Add("openid");
-        o.TokenValidationParameters = new TokenValidationParameters { ValidIssuer = settings.SsoIssuer, ValidAudience = settings.WebClientId, ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, RequireExpirationTime = true, ValidAlgorithms = ["RS256"], ClockSkew = TimeSpan.Zero, NameClaimType = "sub" };
+        o.TokenValidationParameters = new TokenValidationParameters { ValidIssuer = settings.SsoIssuer, ValidAudience = settings.WebClientId, ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, RequireExpirationTime = true, ValidAlgorithms = ["RS256"], ClockSkew = SsoClient.TokenClockSkew, NameClaimType = "sub" };
         o.CorrelationCookie.SameSite = SameSiteMode.Lax; o.NonceCookie.SameSite = SameSiteMode.Lax;
         o.CorrelationCookie.SecurePolicy = o.NonceCookie.SecurePolicy = secureCookies ? CookieSecurePolicy.Always : CookieSecurePolicy.SameAsRequest;
         o.Events.OnRedirectToIdentityProvider = c => { c.ProtocolMessage.RedirectUri = settings.PublicUrl + "/signin-oidc"; return Task.CompletedTask; };
