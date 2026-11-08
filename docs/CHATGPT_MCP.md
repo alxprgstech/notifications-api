@@ -21,7 +21,7 @@ docker compose --env-file $notifyEnv -f compose.yml -f compose.home.yml -f compo
 
 1. Войдите в кабинет Notify и откройте **Интеграции → ChatGPT**. Нажмите **Подключить ChatGPT** и подпишите подтверждение на доверенном телефоне.
 2. Скопируйте OAuth Client ID и Client Secret из одноразового окна. В **ChatGPT → Plugins → Add custom MCP server** укажите адрес MCP из кабинета и выберите OAuth со статическими credentials. Введите выданную пару. [OpenAI Docs](https://developers.openai.com/api/docs/guides/custom-mcp-server)
-3. Скопируйте точный redirect URI из интерфейса ChatGPT и сохраните в поле **OAuth callback из ChatGPT**. Если настройка ChatGPT требует активного OAuth-клиента до показа redirect URI, сначала сохраните предложенный в кабинете стабильный адрес `https://chatgpt.com/connector_platform_oauth_redirect`, затем замените его фактическим адресом перед авторизацией. [Правила redirect URI](https://developers.openai.com/apps-sdk/build/auth/)
+3. Стандартный callback `https://chatgpt.com/connector_platform_oauth_redirect` регистрируется автоматически после подтверждения подключения. Если ChatGPT показывает другой redirect URI, скопируйте его целиком в поле **OAuth callback из ChatGPT** и сохраните перед авторизацией. [Правила redirect URI](https://developers.openai.com/apps-sdk/build/auth/)
 4. Установите плагин, войдите через действующий Notify и подтвердите запрошенные права. Затем проверьте обычный пуш и голосовое сообщение.
 
 Токен доступа действует 10 минут. При запрошенном `offline_access` refresh-сессия длится до 30 дней. Команда **Отключить** отзывает доступ источника сразу. Чтобы получить новый секрет, нажмите **Перевыпустить доступ** и подтвердите действие на телефоне.

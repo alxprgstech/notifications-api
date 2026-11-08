@@ -28,6 +28,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
     public const string McpPath = "/chatgpt/mcp";
     private const string MetadataPath = "/.well-known/oauth-protected-resource/chatgpt/mcp";
     private const string AuthorizePath = "/chatgpt/oauth/authorize";
+    private const string DefaultCallback = "https://chatgpt.com/connector_platform_oauth_redirect";
     private const string Validation = OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme;
     private const string Scheme = OpenIddictServerAspNetCoreDefaults.AuthenticationScheme;
     private const string LinkId = "current";
@@ -207,7 +208,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
     {
         RequireWeb(http);
         var link = ActiveLink();
-        return new { url = Resource(settings), link?.ClientId, link?.RedirectUri };
+        return new { url = Resource(settings), link?.ClientId, link?.RedirectUri, defaultRedirectUri = DefaultCallback };
     }
 
     private IResult Disconnect(HttpContext http)
@@ -229,11 +230,22 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
                   uri.AbsolutePath.StartsWith("/connector/oauth/", StringComparison.Ordinal))))
             throw new Fault(400, "invalid_chatgpt_callback");
 
-        await ConfigureGate.WaitAsync(http.RequestAborted);
+        await RegisterCallback(uri, http.RequestAborted);
+        return Results.NoContent();
+    }
+
+    internal Task EnsureDefaultCallback(CancellationToken cancellationToken = default) =>
+        RegisterCallback(new Uri(DefaultCallback), cancellationToken, onlyIfPending: true);
+
+    private async Task RegisterCallback(Uri uri, CancellationToken cancellationToken, bool onlyIfPending = false)
+    {
+        await ConfigureGate.WaitAsync(cancellationToken);
         try
         {
-            var link = ActiveLink() ?? throw new Fault(404, "chatgpt_not_linked");
-            var client = await applications.FindByClientIdAsync(link.ClientId, http.RequestAborted);
+            var active = ActiveLink();
+            if (onlyIfPending && (active?.PendingSecret == null || active.RedirectUri != null)) return;
+            var link = active ?? throw new Fault(404, "chatgpt_not_linked");
+            var client = await applications.FindByClientIdAsync(link.ClientId, cancellationToken);
             var descriptor = new OpenIddictApplicationDescriptor();
             if (client is null)
             {
@@ -249,14 +261,14 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
                 descriptor.AddResourcePermissions(Resource(settings));
                 foreach (var scope in PermissionsForSource) descriptor.Permissions.Add(Permissions.Prefixes.Scope + scope);
                 descriptor.RedirectUris.Add(uri);
-                await applications.CreateAsync(descriptor, http.RequestAborted);
+                await applications.CreateAsync(descriptor, cancellationToken);
             }
             else
             {
-                await applications.PopulateAsync(descriptor, client, http.RequestAborted);
+                await applications.PopulateAsync(descriptor, client, cancellationToken);
                 descriptor.RedirectUris.Clear();
                 descriptor.RedirectUris.Add(uri);
-                await applications.UpdateAsync(client, descriptor, http.RequestAborted);
+                await applications.UpdateAsync(client, descriptor, cancellationToken);
             }
             db.Run((c, t) =>
             {
@@ -266,7 +278,6 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
                 Put(c, t, "chatgpt_link", LinkId, link with { PendingSecret = null, RedirectUri = uri.AbsoluteUri });
                 return 0;
             });
-            return Results.NoContent();
         }
         finally { ConfigureGate.Release(); }
     }
@@ -288,18 +299,33 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
 
         if (HttpMethods.IsGet(http.Request.Method))
         {
+            // Chromium checks form-action on the redirect from the consent POST too.
+            var callbackOrigin = new Uri(link.RedirectUri).GetLeftPart(UriPartial.Authority);
+            http.Response.Headers.ContentSecurityPolicy = BrowserReturnPage.ContentSecurityPolicy(callbackOrigin);
             var tokens = antiforgery.GetAndStoreTokens(http);
-            var html = new StringBuilder("<!doctype html><html lang=\"ru\"><meta charset=\"utf-8\"><title>Notify</title>" +
-                "<h1>Подключить ChatGPT к Notify</h1><p>Разрешить следующие действия для выделенного источника?</p><ul>");
-            foreach (var scope in scopes) html.Append($"<li>{HtmlEncoder.Default.Encode(scope)}</li>");
+            var html = new StringBuilder("<ul class=\"consent-scopes\">");
+            foreach (var scope in scopes)
+            {
+                var description = scope switch
+                {
+                    "notify:send" => "Отправлять вам текстовые и голосовые уведомления.",
+                    "requests:create" => "Запрашивать у вас подтверждения и отправлять формы для заполнения.",
+                    "requests:read" => "Читать статус и ваши ответы на запросы, созданные этим подключением.",
+                    "requests:cancel" => "Отменять незавершённые запросы, созданные этим подключением.",
+                    Scopes.OfflineAccess => "Продлевать доступ без повторного входа в течение 30 дней.",
+                    _ => "Дополнительное право, запрошенное ChatGPT."
+                };
+                html.Append($"<li><code>{HtmlEncoder.Default.Encode(scope)}</code><p>{description}</p></li>");
+            }
             html.Append($"</ul><form method=\"post\" action=\"{AuthorizePath}\">");
             foreach (var parameter in http.Request.Query)
                 foreach (var value in parameter.Value)
                     html.Append(Hidden(parameter.Key, value ?? ""));
             html.Append(Hidden(tokens.FormFieldName, tokens.RequestToken!));
-            html.Append("<button name=\"decision\" value=\"allow\">Разрешить</button> " +
-                "<button name=\"decision\" value=\"deny\">Отклонить</button></form></html>");
-            return Results.Content(html.ToString(), "text/html; charset=utf-8");
+            html.Append("<div class=\"consent-actions\"><button name=\"decision\" value=\"allow\">Разрешить</button>" +
+                "<button name=\"decision\" value=\"deny\">Отклонить</button></div></form>");
+            return BrowserReturnPage.Render("Подключить ChatGPT к Notify",
+                "Разрешить следующие действия для выделенного источника?", html.ToString());
         }
 
         try { await antiforgery.ValidateRequestAsync(http); }

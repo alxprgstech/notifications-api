@@ -101,12 +101,15 @@ _ = app.Services.GetRequiredService<CallService>();
 if (args.Length == 2 && args[0] == "backup") { app.Services.GetRequiredService<Database>().Backup(args[1]); return; }
 _ = app.Services.GetRequiredService<ChatGptKeys>();
 await using (var scope = app.Services.CreateAsyncScope())
+{
     await scope.ServiceProvider.GetRequiredService<ChatGptDb>().Database.EnsureCreatedAsync();
+    await scope.ServiceProvider.GetRequiredService<ChatGptOAuth>().EnsureDefaultCallback();
+}
 if (!string.IsNullOrEmpty(settings.TrustedProxyNetwork)) app.UseForwardedHeaders();
 app.Use(async (context, next) =>
 {
     context.Response.Headers.XContentTypeOptions = "nosniff"; context.Response.Headers["Referrer-Policy"] = "no-referrer";
-    context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+    context.Response.Headers.ContentSecurityPolicy = BrowserReturnPage.ContentSecurityPolicy();
     if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/auth") || context.Request.Path.StartsWithSegments("/android")) context.Response.Headers.CacheControl = "no-store";
     ChatGptOAuth.ProtectResponse(context, settings);
     try { await next(); }
@@ -221,7 +224,8 @@ api.Map("/agents/connect", async (HttpContext c, AgentHub hub, CancellationToken
 api.MapPost("/devices/fcm", (FcmInput input, HttpContext c, NotificationService service) => { service.SetFcm(Auth.Actor(c), input.Token); return Results.NoContent(); });
 api.MapGet("/sources", (HttpContext c, NotificationService service) => service.Sources(Auth.Actor(c)));
 api.MapPost("/management", (ManagementInput input, HttpContext c, NotificationService service) => { if (input.WebhookUrl != null) WebhookPolicy.Validate(input.WebhookUrl, settings); return service.BeginManagement(Auth.Actor(c), input); });
-api.MapGet("/management/{id}", (string id, HttpContext c, NotificationService service) => service.ManagementResult(Auth.Actor(c), id));
+api.MapGet("/management/{id}", (string id, HttpContext c, NotificationService service, ChatGptOAuth chatGpt) =>
+    service.ManagementResult(Auth.Actor(c), id, chatGpt, c.RequestAborted));
 api.MapPost("/icons", async (HttpContext c, Database db, CancellationToken ct) =>
 {
     var actor = Auth.Actor(c); if (!actor.IsOwner) actor.RequireScope("icons:write");

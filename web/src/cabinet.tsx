@@ -13,7 +13,7 @@ type Secret = { token: string; webhookSecret?: string; sourceId?: string };
 type Outcome = { tone: 'success' | 'warning' | 'danger'; title: string; text?: string };
 type Approval = { id: string; deadline: number; action: ManagementInput['action'] };
 type ChatGptCredentials = { clientId: string; clientSecret: string };
-type ChatGptStatus = { url: string; clientId: string | null; redirectUri: string | null };
+type ChatGptStatus = { url: string; clientId: string | null; redirectUri: string | null; defaultRedirectUri: string };
 type Resources = {
   history: HistoryPage; sources: Source[]; devices: Device[]; agents: Agent[]; calls: Call[];
 };
@@ -411,8 +411,6 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
   </div>;
 }
 
-const stableChatGptCallback = 'https://chatgpt.com/connector_platform_oauth_redirect';
-
 function ChatGptPanel({ api, revision, busy, connect, changed }: {
   api: <T>(path: string, body?: unknown, signal?: AbortSignal) => Promise<T>;
   revision: number; busy: boolean; connect: () => void; changed: () => void;
@@ -427,7 +425,7 @@ function ChatGptPanel({ api, revision, busy, connect, changed }: {
     api<ChatGptStatus>('/chatgpt', undefined, controller.signal).then(result => {
       if (controller.signal.aborted) return;
       setStatus(result);
-      setRedirectUri(result.redirectUri ?? stableChatGptCallback);
+      setRedirectUri(result.redirectUri ?? result.defaultRedirectUri);
     }).catch(reason => { if (!controller.signal.aborted) setError(errorText(reason)); });
     return () => controller.abort();
   }, [api, revision]);
@@ -461,7 +459,8 @@ function ChatGptPanel({ api, revision, busy, connect, changed }: {
       }}>
         <label className="field">OAuth callback из ChatGPT<input type="url" required value={redirectUri}
           onChange={event => setRedirectUri(event.target.value)} /></label>
-        <button className="button secondary" disabled={busy || saving || redirectUri === status.redirectUri}>Сохранить callback</button>
+        <p>Стандартный адрес настроен автоматически. Если ChatGPT показывает другой адрес, введите и сохраните его здесь.</p>
+        <button className="button secondary" disabled={busy || saving || redirectUri.trim() === (status.redirectUri ?? status.defaultRedirectUri)}>Сохранить callback</button>
       </form>}
       <div className="top-actions">
         <button className="button primary" disabled={busy || saving} onClick={connect}>

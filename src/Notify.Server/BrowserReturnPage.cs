@@ -5,7 +5,12 @@ namespace Notify;
 
 internal static class BrowserReturnPage
 {
-    public static IResult Render(string title, string description) => Results.Content($$"""
+    public static string ContentSecurityPolicy(string formRedirectOrigin = "") =>
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+        "connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" +
+        (formRedirectOrigin.Length == 0 ? "" : " " + formRedirectOrigin);
+
+    public static IResult Render(string title, string description, string trustedContent = "") => Results.Content($$"""
         <!doctype html>
         <html lang="ru">
         <meta charset="utf-8">
@@ -24,12 +29,23 @@ internal static class BrowserReturnPage
           .mark { display:grid; place-items:center; width:36px; height:36px; border-radius:10px; background:var(--accent); color:var(--on-accent); }
           h1 { margin:20px 0 8px; font-size:clamp(1.5rem,5vw,2rem); line-height:1.2; letter-spacing:-.025em; }
           p { margin:0; color:var(--muted); }
+          .consent-scopes { display:grid; gap:8px; margin:20px 0; padding:0; list-style:none; }
+          .consent-scopes li { padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:var(--canvas); }
+          .consent-scopes code { font-weight:700; overflow-wrap:anywhere; }
+          .consent-scopes p { margin-top:2px; }
+          .consent-actions { display:flex; flex-wrap:wrap; gap:8px; }
+          .consent-actions button { min-height:44px; padding:8px 16px; border:1px solid var(--muted); border-radius:9px; background:var(--surface); color:var(--text); font:inherit; font-weight:650; cursor:pointer; }
+          .consent-actions [value=allow] { background:var(--accent); border-color:var(--accent); color:var(--on-accent); }
+          .consent-actions button:hover { text-decoration:underline; }
+          .consent-actions button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+          @media (max-width:360px) { .consent-actions button { flex:1; } }
         </style>
         <script src="/notify-appearance.js" defer></script>
         <main>
           <div class="brand"><span class="mark"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg></span>Notify</div>
           <h1>{{HtmlEncoder.Default.Encode(title)}}</h1>
           <p>{{HtmlEncoder.Default.Encode(description)}}</p>
+          {{trustedContent}}
         </main>
         </html>
         """, "text/html; charset=utf-8");

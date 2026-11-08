@@ -241,16 +241,30 @@ class Consent(HTMLParser):
             self.fields[attrs["name"]] = attrs["value"]
 
 
-def code_flow(browser, adapter, resource, client_id, scopes=SCOPES, *, reuse_session=True):
+def code_flow(browser, adapter, resource, client_id, scopes=SCOPES, *, reuse_session=True, callback=None):
     verifier = secrets.token_urlsafe(48)
     state = secrets.token_urlsafe(24)
-    callback = adapter + "/test-client/callback"
+    callback = callback or adapter + "/test-client/callback"
     consent = browser.get(adapter + "/chatgpt/oauth/authorize", params={
         "client_id": client_id, "redirect_uri": callback, "response_type": "code",
         "code_challenge": digest(verifier), "code_challenge_method": "S256",
         "resource": resource, "scope": scopes, "state": state,
     }, follow_redirects=True)
     consent.raise_for_status()
+    assert 'class="consent-scopes"' in consent.text and '<meta name="viewport"' in consent.text
+    assert "no-store" in consent.headers["cache-control"].split(", ")
+    callback_origin = urlsplit(callback)
+    assert consent.headers["content-security-policy"].endswith(
+        f"form-action 'self' {callback_origin.scheme}://{callback_origin.netloc}")
+    descriptions = {
+        "notify:send": "Отправлять вам текстовые и голосовые уведомления.",
+        "requests:create": "Запрашивать у вас подтверждения и отправлять формы для заполнения.",
+        "requests:read": "Читать статус и ваши ответы на запросы, созданные этим подключением.",
+        "requests:cancel": "Отменять незавершённые запросы, созданные этим подключением.",
+        "offline_access": "Продлевать доступ без повторного входа в течение 30 дней.",
+    }
+    for scope, description in descriptions.items():
+        assert (f"<code>{scope}</code><p>{description}</p>" in consent.text) == (scope in scopes.split())
     if reuse_session:
         assert not consent.history
     else:
@@ -375,6 +389,12 @@ def smoke(directory, silero):
         management_path = notify + "/api/v1/management/" + management["id"]
         connection = client.get(management_path).raise_for_status().json()["result"]
         assert "result" not in client.get(management_path).raise_for_status().json()
+        default_callback = "https://chatgpt.com/connector_platform_oauth_redirect"
+        status = client.get(notify + "/api/v1/chatgpt").raise_for_status().json()
+        assert status["redirectUri"] == status["defaultRedirectUri"] == default_callback
+        auth = (connection["clientId"], connection["clientSecret"])
+        fields = code_flow(client, adapter, resource, auth[0], callback=default_callback)
+        client.post(discovery["token_endpoint"], data=fields, auth=auth).raise_for_status()
         callback = notify + "/test-client/callback"
         assert client.post(notify + "/api/v1/chatgpt/callback", json={"redirectUri": callback},
                            headers={"Origin": notify}).status_code == 403
@@ -383,7 +403,6 @@ def smoke(directory, silero):
         client.post(notify + "/api/v1/chatgpt/callback", json={"redirectUri": callback},
                     headers=browser_headers).raise_for_status()
         assert client.get(notify + "/api/v1/chatgpt").json()["redirectUri"] == callback
-        auth = (connection["clientId"], connection["clientSecret"])
         with httpx.Client(timeout=15, trust_env=False) as fresh:
             fields = code_flow(fresh, adapter, resource, auth[0], reuse_session=False)
         token_url = discovery["token_endpoint"]

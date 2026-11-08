@@ -543,13 +543,25 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             return m;
         });
     }
-    public object ManagementResult(Actor actor, string id)
+    public object ManagementResult(Actor actor, string id) => ReadManagementResult(actor, id, deferChatGpt: false)!;
+
+    internal async Task<object> ManagementResult(Actor actor, string id, ChatGptOAuth chatGpt, CancellationToken cancellationToken)
+    {
+        var result = ReadManagementResult(actor, id, deferChatGpt: true);
+        if (result != null) return result;
+        await chatGpt.EnsureDefaultCallback(cancellationToken);
+        return ManagementResult(actor, id);
+    }
+
+    private object? ReadManagementResult(Actor actor, string id, bool deferChatGpt)
     {
         actor.RequireOwner(); return db.Run((c, t) =>
         {
-            var m = Get<Management>(c, t, "management", id) ?? throw new Fault(404, "management_not_found");
-            if (m.SessionId != (actor.SessionId ?? actor.Id)) throw new Fault(404, "management_not_found");
+            var m = Get<Management>(c, t, "management", id);
+            if (m == null || m.SessionId != (actor.SessionId ?? actor.Id))
+                throw new Fault(404, "management_not_found");
             if (m.ProtectedResult == null) return (object)new { m.Id, m.Status };
+            if (deferChatGpt && m.Input.Action == ChatGptOAuth.LinkAction) return null;
             Put(c, t, "management", id, m with { ProtectedResult = null }); return new { m.Id, m.Status, result = Wire.Decode<System.Text.Json.JsonElement>(Unprotect(m.ProtectedResult)) };
         });
     }

@@ -163,7 +163,8 @@ try {
   const devices = [{ id: 'phone', name: 'Мой Android', revoked: false }];
   const fixtures = {
     session: { actor: { kind: 'web' }, csrfToken: fixtureToken },
-    chatgpt: { url: 'https://notify.alxprgs.tech/chatgpt/mcp', clientId: null, redirectUri: null },
+    chatgpt: { url: 'https://notify.alxprgs.tech/chatgpt/mcp', clientId: null, redirectUri: null,
+      defaultRedirectUri: 'https://chatgpt.com/connector_platform_oauth_redirect' },
     sources, devices,
     agents: [{ id: 'agent1', sourceId: 'fixture', name: 'Агент разработки', capabilities: ['text_tasks', 'realtime_audio'],
       revoked: false, online: true, lastSeenAt: now, sessions: [{ id: 'task1', name: 'Сборка' }] }],
@@ -216,6 +217,7 @@ try {
         const action = changes.at(-1).action;
         if (action === 'chatgpt.link') {
           fixtures.chatgpt.clientId = 'synthetic-chatgpt-client';
+          fixtures.chatgpt.redirectUri = fixtures.chatgpt.defaultRedirectUri;
           return await route.fulfill({ json: { status: 'approved', result: {
             clientId: fixtures.chatgpt.clientId, clientSecret: 'synthetic-chatgpt-secret',
           } } });
@@ -375,6 +377,8 @@ try {
   assert.equal(await chatgpt.getByLabel('OAuth Client Secret').inputValue(), 'synthetic-chatgpt-secret');
   await chatgpt.getByRole('button', { name: 'Готово' }).click();
   const callback = page.getByLabel('OAuth callback из ChatGPT');
+  assert.equal(await callback.inputValue(), fixtures.chatgpt.defaultRedirectUri);
+  assert.equal(await button('Сохранить callback').isDisabled(), true);
   await callback.fill('https://chatgpt.com/connector/oauth/example');
   await button('Сохранить callback').click();
   await button('Сохранить callback').waitFor();
