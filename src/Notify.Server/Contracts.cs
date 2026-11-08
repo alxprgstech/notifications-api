@@ -51,7 +51,7 @@ public sealed record CallChallenge(string Id, string DeviceId, string Payload, l
 public sealed record CallChallengeProof(string Protocol, string ChallengeId, string DeviceId, string Direction, string Action, string SourceId, string AgentId, string? SessionId, string? CallId, string? InviteId, string SecurityLevel, string Nonce, long ExpiresAt);
 public sealed record CallRecord(string Id, string SourceId, string AgentId, string? DeviceId, string? SessionId, string SecurityLevel, long StartedAt, long EndedAt, string Status, string? Reason, int DurationMs, string Direction = "outgoing");
 public sealed record AgentCommand(string Id, string AgentId, string SourceId, string Type, string Payload, long CreatedAt, long ExpiresAt, string Status = "queued", int Attempts = 0, long? AckedAt = null, string? CorrelationId = null, string? SessionId = null);
-public sealed record ManagementInput(string Action, string? Name = null, string? TargetId = null, string[]? Scopes = null, string? Preview = null, string? IconId = null, string? WebhookUrl = null, string[]? Capabilities = null);
+public sealed record ManagementInput(string Action, string? Name = null, string? TargetId = null, string[]? Scopes = null, string? Preview = null, string? IconId = null, string? WebhookUrl = null, string[]? Capabilities = null, long? ExpectedRevision = null);
 public sealed record Management(string Id, string SessionId, ManagementInput Input, long ExpiresAt, string Status = "pending", string? ProtectedResult = null);
 public sealed record Icon(string Id, string? SourceId, string ContentType, string FileName);
 public sealed record Actor(string Kind, string Id, string[] Scopes, string? SessionId = null)

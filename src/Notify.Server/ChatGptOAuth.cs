@@ -19,7 +19,7 @@ using static OpenIddict.Abstractions.OpenIddictConstants;
 
 namespace Notify;
 
-internal sealed record ChatGptLink(string SourceId, string ClientId, string? PendingSecret, string? RedirectUri);
+internal sealed record ChatGptLink(string SourceId, string ClientId, string? PendingSecret, string? RedirectUri, long PermissionsRevision = 0);
 internal sealed record ChatGptCallback(string RedirectUri);
 internal sealed class ChatGptDb(DbContextOptions<ChatGptDb> options) : DbContext(options);
 
@@ -33,6 +33,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
     private const string Scheme = OpenIddictServerAspNetCoreDefaults.AuthenticationScheme;
     private const string LinkId = "current";
     internal const string LinkAction = "chatgpt.link";
+    internal const string PermissionsAction = "chatgpt.permissions.update";
     internal static readonly string[] PermissionsForSource = ["notify:send", "requests:create", "requests:read", "requests:cancel", ChatGptCall.Scope];
 
     private static string Resource(Settings settings) => settings.PublicUrl.TrimEnd('/') + McpPath;
@@ -196,23 +197,80 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
         return link != null && Get<Source>(c, t, "source", link.SourceId) is { Revoked: false } ? link : null;
     });
 
-    public Actor? GetActor(ClaimsPrincipal principal) => db.Run((c, t) =>
+    public Actor? GetActor(ClaimsPrincipal principal) => GetAccess(principal).Actor;
+
+    private (Actor? Actor, bool Managed) GetAccess(ClaimsPrincipal principal) => db.Run<(Actor?, bool)>((c, t) =>
     {
         var link = Get<ChatGptLink>(c, t, "chatgpt_link", LinkId);
         if (link?.RedirectUri == null || principal.GetClaim(Claims.Subject) != settings.OwnerSub ||
             !(principal.GetExpirationDate() > DateTimeOffset.UtcNow) ||
             !principal.GetPresenters().Contains(link.ClientId) ||
             Get<Source>(c, t, "source", link.SourceId) is not { Revoked: false } source)
-            return null;
-        return new Actor("integration", source.Id, principal.GetScopes().Intersect(source.Scopes, StringComparer.Ordinal).ToArray());
+            return (null, false);
+        var managed = link.PermissionsRevision > 0;
+        var allowed = source.Scopes.Intersect(PermissionsForSource, StringComparer.Ordinal);
+        var scopes = managed ? allowed : principal.GetScopes().Intersect(allowed, StringComparer.Ordinal);
+        return (new Actor("integration", source.Id, scopes.ToArray()), managed);
     });
 
     private object Status(HttpContext http)
     {
         RequireWeb(http);
-        var link = ActiveLink();
-        return new { url = Resource(settings), link?.ClientId, link?.RedirectUri, defaultRedirectUri = DefaultCallback };
+        return db.Run((c, t) =>
+        {
+            var link = Get<ChatGptLink>(c, t, "chatgpt_link", LinkId);
+            var source = link == null ? null : Get<Source>(c, t, "source", link.SourceId);
+            if (source is not { Revoked: false }) { link = null; source = null; }
+            return new
+            {
+                url = Resource(settings), link?.ClientId, link?.RedirectUri, defaultRedirectUri = DefaultCallback,
+                sourceId = source?.Id, scopes = source?.Scopes ?? [], permissionsRevision = link?.PermissionsRevision ?? 0,
+                availablePermissions = PermissionsForSource.Select(scope => new { scope, label = PermissionLabel(scope) }).ToArray()
+            };
+        });
     }
+
+    internal static (ChatGptLink Link, Source Source)? PermissionTarget(SqliteConnection c, SqliteTransaction t, ManagementInput input)
+    {
+        var link = Get<ChatGptLink>(c, t, "chatgpt_link", LinkId);
+        if (link == null || link.SourceId != input.TargetId || link.PermissionsRevision != input.ExpectedRevision ||
+            Get<Source>(c, t, "source", link.SourceId) is not { Revoked: false } source)
+            return null;
+        return (link, source);
+    }
+
+    internal static string PermissionChangeDescription(string[] current, string[] proposed)
+    {
+        var added = proposed.Except(current, StringComparer.Ordinal).Select(PermissionLabel);
+        var removed = current.Except(proposed, StringComparer.Ordinal).Select(PermissionLabel);
+        var changes = new[] { (Label: "Добавить", Rights: string.Join(", ", added)), (Label: "Снять", Rights: string.Join(", ", removed)) };
+        var summary = string.Join(" ", changes.Where(change => change.Rights.Length > 0).Select(change => $"{change.Label}: {change.Rights}."));
+        if (summary.Length == 0) summary = "Применить текущий набор: " + string.Join(", ", proposed.Select(PermissionLabel)) + ".";
+        return summary +
+            " Новый набор прав будет действовать для всех действующих токенов этого подключения ChatGPT, в том числе ранее выданных с урезанным доступом.";
+    }
+
+    internal static bool ApplyPermissions(SqliteConnection c, SqliteTransaction t, ManagementInput input, out string? stopCallSource)
+    {
+        stopCallSource = null;
+        if (PermissionTarget(c, t, input) is not { } target) return false;
+        var scopes = input.Scopes!;
+        Put(c, t, "source", target.Source.Id, target.Source with { Scopes = scopes });
+        Put(c, t, "chatgpt_link", LinkId, target.Link with { PermissionsRevision = target.Link.PermissionsRevision + 1 });
+        if (target.Source.Scopes.Contains(ChatGptCall.Scope) && !scopes.Contains(ChatGptCall.Scope))
+            stopCallSource = target.Source.Id;
+        return true;
+    }
+
+    private static string PermissionLabel(string scope) => scope switch
+    {
+        "notify:send" => "Отправка текстовых и голосовых уведомлений",
+        "requests:create" => "Создание подтверждений и форм",
+        "requests:read" => "Чтение своих запросов и ответов",
+        "requests:cancel" => "Отмена своих запросов",
+        ChatGptCall.Scope => "Звонки с озвучкой",
+        _ => scope
+    };
 
     private async Task<IResult> Disconnect(HttpContext http)
     {
@@ -240,6 +298,19 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
 
     internal Task EnsureDefaultCallback(CancellationToken cancellationToken = default) =>
         RegisterCallback(new Uri(DefaultCallback), cancellationToken, onlyIfPending: true);
+
+    internal async Task EnsureRegisteredPermissions()
+    {
+        var link = ActiveLink();
+        if (link?.RedirectUri == null || await applications.FindByClientIdAsync(link.ClientId) is not { } client) return;
+        var required = PermissionsForSource.Select(scope => Permissions.Prefixes.Scope + scope).ToArray();
+        var current = await applications.GetPermissionsAsync(client);
+        if (required.All(current.Contains)) return;
+        var descriptor = new OpenIddictApplicationDescriptor();
+        await applications.PopulateAsync(descriptor, client);
+        descriptor.Permissions.UnionWith(required);
+        await applications.UpdateAsync(client, descriptor);
+    }
 
     private async Task RegisterCallback(Uri uri, CancellationToken cancellationToken, bool onlyIfPending = false)
     {
@@ -308,7 +379,11 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
             http.Response.Headers.ContentSecurityPolicy = BrowserReturnPage.ContentSecurityPolicy(callbackOrigin);
             var tokens = antiforgery.GetAndStoreTokens(http);
             var html = new StringBuilder("<ul class=\"consent-scopes\">");
-            foreach (var scope in scopes)
+            var managed = link.PermissionsRevision > 0;
+            var displayedScopes = managed
+                ? db.Run((c, t) => Get<Source>(c, t, "source", link.SourceId)?.Scopes ?? []).Concat(scopes.Where(s => s == Scopes.OfflineAccess))
+                : scopes;
+            foreach (var scope in displayedScopes)
             {
                 var description = scope switch
                 {
@@ -329,8 +404,9 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
             html.Append(Hidden(tokens.FormFieldName, tokens.RequestToken!));
             html.Append("<div class=\"consent-actions\"><button name=\"decision\" value=\"allow\">Разрешить</button>" +
                 "<button name=\"decision\" value=\"deny\">Отклонить</button></div></form>");
-            return BrowserReturnPage.Render("Подключить ChatGPT к Notify",
-                "Разрешить следующие действия для выделенного источника?", html.ToString());
+            return BrowserReturnPage.Render("Подключить ChatGPT к Notify", managed
+                ? "Подключение получит текущие права из кабинета Notify. Владелец может изменить их для всех токенов этого подключения."
+                : "Разрешить следующие действия для выделенного источника?", html.ToString());
         }
 
         try { await antiforgery.ValidateRequestAsync(http); }
@@ -394,12 +470,14 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
             filters.AddListToolsFilter(next => async (context, ct) =>
             {
                 var result = await next(context, ct);
-                var path = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext?.Request.Path;
+                var http = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
+                var isChatGpt = http?.Request.Path == McpPath;
+                var managed = isChatGpt && http!.RequestServices.GetRequiredService<ChatGptOAuth>().GetAccess(http.User).Managed;
                 return new ListToolsResult
                 {
                     NextCursor = result.NextCursor,
-                    Tools = path == McpPath
-                        ? result.Tools.Where(tool => ToolScope(tool.Name) != null).Select(DescribeOAuth).ToArray()
+                    Tools = isChatGpt
+                        ? result.Tools.Where(tool => ToolScope(tool.Name) != null).Select(tool => DescribeOAuth(tool, managed)).ToArray()
                         : result.Tools.Where(tool => tool.Name is not ("send_voice" or "start_call")).ToArray()
                 };
             });
@@ -409,12 +487,13 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
                 var http = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
                 if (http?.Request.Path != McpPath)
                     return name is "send_voice" or "start_call" ? ValueTask.FromResult(ToolError("unknown_tool")) : next(context, ct);
-                var actor = http.RequestServices.GetRequiredService<ChatGptOAuth>().GetActor(http.User);
+                var (actor, managed) = http.RequestServices.GetRequiredService<ChatGptOAuth>().GetAccess(http.User);
                 if (actor == null) return ValueTask.FromResult(ToolError("unauthenticated"));
                 var scope = name == null ? null : ToolScope(name);
                 if (scope == null) return ValueTask.FromResult(ToolError("unknown_tool"));
                 if (!actor.Scopes.Contains(scope))
                 {
+                    if (managed) return ValueTask.FromResult(ToolError("permission_disabled"));
                     var error = ToolError("insufficient_scope");
                     error.Meta = new JsonObject
                     {
@@ -431,7 +510,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
     private static CallToolResult ToolError(string code) =>
         new() { IsError = true, Content = [new TextContentBlock { Text = code }] };
 
-    private static Tool DescribeOAuth(Tool tool) => new()
+    private static Tool DescribeOAuth(Tool tool, bool managed) => new()
     {
         Name = tool.Name, Title = tool.Title, Description = tool.Description, InputSchema = tool.InputSchema,
         OutputSchema = tool.OutputSchema, Annotations = tool.Annotations,
@@ -439,7 +518,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
         {
             ["securitySchemes"] = new JsonArray(new JsonObject
             {
-                ["type"] = "oauth2", ["scopes"] = new JsonArray(ToolScope(tool.Name))
+                ["type"] = "oauth2", ["scopes"] = managed ? new JsonArray() : new JsonArray(ToolScope(tool.Name))
             })
         }
     };

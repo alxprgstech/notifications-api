@@ -13,7 +13,11 @@ type Secret = { token: string; webhookSecret?: string; sourceId?: string };
 type Outcome = { tone: 'success' | 'warning' | 'danger'; title: string; text?: string };
 type Approval = { id: string; deadline: number; action: ManagementInput['action'] };
 type ChatGptCredentials = { clientId: string; clientSecret: string };
-type ChatGptStatus = { url: string; clientId: string | null; redirectUri: string | null; defaultRedirectUri: string };
+type ChatGptStatus = {
+  url: string; clientId: string | null; redirectUri: string | null; defaultRedirectUri: string;
+  sourceId: string | null; scopes: string[]; permissionsRevision: number;
+  availablePermissions: { scope: string; label: string }[];
+};
 type Resources = {
   history: HistoryPage; sources: Source[]; devices: Device[]; agents: Agent[]; calls: Call[];
 };
@@ -28,6 +32,7 @@ const errors: Record<string, string> = {
   agent_registration_pending: 'Запрос на регистрацию этого агента уже ожидает подтверждения.',
   invalid_chatgpt_callback: 'Введите точный HTTPS callback из настроек подключения ChatGPT.',
   chatgpt_link_changed: 'Подключение изменилось. Обновите кабинет и повторите действие.',
+  chatgpt_permissions_changed: 'Разрешения ChatGPT уже изменились. Проверьте текущий набор и повторите действие.',
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -209,7 +214,7 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
           if (state.result?.token) setSecret({ ...state.result, token: state.result.token });
           if (state.result?.clientId && state.result.clientSecret)
             setChatgptSecret({ clientId: state.result.clientId, clientSecret: state.result.clientSecret });
-          if (action === 'chatgpt.link') setChatgptRevision(value => value + 1);
+          if (action === 'chatgpt.link' || action === 'chatgpt.permissions.update') setChatgptRevision(value => value + 1);
           if ((action === 'integration.create' && !state.result?.token) ||
               (action === 'chatgpt.link' && !state.result?.clientSecret)) {
             finish({ tone: 'warning', title: 'Доступ создан, одноразовые данные недоступны' });
@@ -217,6 +222,9 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
             finish({ tone: 'success', title: 'Действие подтверждено' });
           }
           void load(undefined, true);
+        } else if (state.status === 'conflict' && action === 'chatgpt.permissions.update') {
+          setChatgptRevision(value => value + 1);
+          finish({ tone: 'warning', title: 'Разрешения ChatGPT уже изменились', text: 'Проверьте текущие права и отправьте новый запрос.' });
         } else if (state.status === 'denied' || state.status === 'rejected') {
           finish({ tone: 'warning', title: 'Действие отклонено', text: 'Изменения не применены.' });
         } else if (state.status === 'expired' || (state.status === 'pending' && Date.now() >= deadline)) {
@@ -300,7 +308,11 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
       if (mounted.current) setApproval({ id: result.id, deadline: Date.now() + 300_000, action: input.action });
     } catch (error) {
       mutation.current = false;
-      if (mounted.current) setOutcome({ tone: 'danger', title: errorText(error) });
+      if (mounted.current) {
+        if (input.action === 'chatgpt.permissions.update' && error instanceof ApiError && error.status === 409)
+          setChatgptRevision(value => value + 1);
+        setOutcome({ tone: 'danger', title: errorText(error) });
+      }
     } finally {
       if (mounted.current) setSubmitting(false);
     }
@@ -381,6 +393,7 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
           open={setForm} manage={input => void manage(input)} blocked={loading || !!failure} />}
         {tab === 'sources' && <ChatGptPanel api={api} revision={chatgptRevision} busy={busy}
           connect={() => void manage({ action: 'chatgpt.link' })}
+          manage={input => void manage(input)}
           changed={() => { setChatgptRevision(value => value + 1); void load(undefined, true); }} />}
         {tab === 'devices' && <Devices devices={devices} busy={busy} open={setForm} blocked={loading || !!failure} />}
         {tab === 'calls' && <Calls calls={calls} agents={agents} sources={sources} blocked={loading || !!failure} />}
@@ -411,12 +424,14 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
   </div>;
 }
 
-function ChatGptPanel({ api, revision, busy, connect, changed }: {
+function ChatGptPanel({ api, revision, busy, connect, manage, changed }: {
   api: <T>(path: string, body?: unknown, signal?: AbortSignal) => Promise<T>;
   revision: number; busy: boolean; connect: () => void; changed: () => void;
+  manage: (input: ManagementInput) => void;
 }) {
   const [status, setStatus] = useState<ChatGptStatus | null>(null);
   const [redirectUri, setRedirectUri] = useState('');
+  const [scopes, setScopes] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
@@ -426,9 +441,13 @@ function ChatGptPanel({ api, revision, busy, connect, changed }: {
       if (controller.signal.aborted) return;
       setStatus(result);
       setRedirectUri(result.redirectUri ?? result.defaultRedirectUri);
+      setScopes(result.scopes);
     }).catch(reason => { if (!controller.signal.aborted) setError(errorText(reason)); });
     return () => controller.abort();
   }, [api, revision]);
+  const permissionsChanged = status?.availablePermissions.some(({ scope }) =>
+    scopes.includes(scope) !== status.scopes.includes(scope));
+  const canSavePermissions = status?.permissionsRevision === 0 || permissionsChanged;
 
   async function submit(path: string, body: unknown) {
     setSaving(true);
@@ -461,6 +480,26 @@ function ChatGptPanel({ api, revision, busy, connect, changed }: {
           onChange={event => setRedirectUri(event.target.value)} /></label>
         <p>Стандартный адрес настроен автоматически. Если ChatGPT показывает другой адрес, введите и сохраните его здесь.</p>
         <button className="button secondary" disabled={busy || saving || redirectUri.trim() === (status.redirectUri ?? status.defaultRedirectUri)}>Сохранить callback</button>
+      </form>}
+      {status.sourceId && <form className="management-form" onSubmit={event => {
+        event.preventDefault();
+        if (!canSavePermissions || busy || saving) return;
+        manage({ action: 'chatgpt.permissions.update', targetId: status.sourceId!, expectedRevision: status.permissionsRevision, scopes });
+        setScopes(status.scopes);
+      }}>
+        <fieldset disabled={busy || saving}>
+          <legend>Разрешения</legend>
+          <div className="management-form">
+            {status.availablePermissions.map(({ scope, label }) => <label key={scope}>
+              <input type="checkbox" checked={scopes.includes(scope)} onChange={event => {
+                const checked = event.target.checked;
+                setScopes(current => checked ? [...current, scope] : current.filter(value => value !== scope));
+              }} /> {label}
+            </label>)}
+          </div>
+        </fieldset>
+        <p>После подтверждения на телефоне изменения применятся ко всем действующим токенам этого подключения.</p>
+        <button className="button secondary" disabled={busy || saving || !canSavePermissions}>Сохранить разрешения</button>
       </form>}
       <div className="top-actions">
         <button className="button primary" disabled={busy || saving} onClick={connect}>

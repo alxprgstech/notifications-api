@@ -320,7 +320,7 @@ async def mcp_call(adapter, token, name=None, args=None, *, error=None, legacy=F
                     if legacy:
                         return {tool.name for tool in tools}
                     return {
-                        tool.name: tool.model_dump(by_alias=True)["_meta"]["securitySchemes"][0]["scopes"][0]
+                        tool.name: next(iter(tool.model_dump(by_alias=True)["_meta"]["securitySchemes"][0]["scopes"]), None)
                         for tool in tools
                     }
                 result = (await session.call_tool(name, args)).model_dump(by_alias=True)
@@ -328,6 +328,8 @@ async def mcp_call(adapter, token, name=None, args=None, *, error=None, legacy=F
                     assert result["isError"] and error in result["content"][0]["text"], result
                     if error == "insufficient_scope":
                         assert "mcp/www_authenticate" in result["_meta"]
+                    if error == "permission_disabled":
+                        assert "mcp/www_authenticate" not in (result.get("_meta") or {})
                     return None
                 assert not result["isError"], result
                 return result.get("structuredContent") or json.loads(result["content"][0]["text"])
@@ -528,13 +530,88 @@ def smoke(directory, silero):
         # authorization so this last check isolates the effect of disconnecting the link.
         fields = code_flow(client, adapter, resource, auth[0])
         token = client.post(token_url, data=fields, auth=auth).raise_for_status().json()["access_token"]
+        status_url = notify + "/api/v1/chatgpt"
+        initial_permissions = client.get(status_url).raise_for_status().json()
+        old_scopes = SCOPES.replace(" calls:start", "")
+        old_fields = code_flow(client, adapter, resource, auth[0], old_scopes)
+        old_grant = client.post(token_url, data=old_fields, auth=auth).raise_for_status().json()
+        old_token = old_grant["access_token"]
+        narrow_fields = code_flow(client, adapter, resource, auth[0], "requests:read")
+        narrow_token = client.post(token_url, data=narrow_fields, auth=auth).raise_for_status().json()["access_token"]
+        call(adapter, old_token, "start_call", dial, error="insufficient_scope")
+        call(adapter, narrow_token, "start_call", dial, error="insufficient_scope")
+
+        def change_permissions(scopes):
+            current = client.get(status_url).raise_for_status().json()
+            payload = {"action": "chatgpt.permissions.update", "targetId": current["sourceId"],
+                       "expectedRevision": current["permissionsRevision"], "scopes": scopes}
+            management_id = client.post(notify + "/api/v1/management", json=payload, headers=browser_headers).raise_for_status().json()["id"]
+            notices = phone.get("/api/v1/notifications").raise_for_status().json()["items"]
+            notice = next(item for item in notices if item.get("managementId") == management_id)
+            return management_id, "/api/v1/notifications/" + notice["id"]
+
+        def approve_permissions(change, decision="yes", *, bad_signature=False, expected_status=None):
+            management_id, notification_url = change
+            response = {"decision": decision}
+            challenge = phone.post(notification_url + "/challenge", json=response).raise_for_status().json()
+            signature = device_key.sign(base64.b64decode(challenge["payload"]), ec.ECDSA(hashes.SHA256()))
+            result = phone.post(notification_url + "/response", json={
+                "answer": response, "challengeId": challenge["id"],
+                "signature": base64.b64encode(b"invalid" if bad_signature else signature).decode(),
+            })
+            if bad_signature:
+                assert result.status_code == 403
+            elif expected_status is not None:
+                assert result.status_code == expected_status
+            else:
+                result.raise_for_status()
+            management = client.get(notify + "/api/v1/management/" + management_id).raise_for_status().json()
+            assert not {"clientId", "clientSecret"}.intersection(management.get("result", {}))
+            return management["status"]
+
+        original_scopes = initial_permissions["scopes"]
+        # Simulate the pre-calls source on an existing link, whose revision and credentials are unchanged.
+        baseline = [scope for scope in original_scopes if scope != "calls:start"]
+        with sqlite3.connect(data / "notify.db") as db:
+            db.execute("UPDATE objects SET data=json_set(data,'$.scopes',json(?)) WHERE kind='source' AND id=?",
+                       (json.dumps(baseline), initial_permissions["sourceId"]))
+        enable = change_permissions(original_scopes)
+        stale = change_permissions([])
+        assert approve_permissions(enable, bad_signature=True) == "pending"
+        assert client.get(status_url).raise_for_status().json()["scopes"] == baseline
+        assert approve_permissions(enable) == "approved"
+        assert approve_permissions(stale) == "conflict"
+        assert all(scope is None for scope in call(adapter, old_token).values())
+        expired = change_permissions([])
+        with sqlite3.connect(data / "notify.db") as db:
+            db.execute("UPDATE objects SET data=json_set(data,'$.expiresAt',?) WHERE kind='management' AND id=?",
+                       (int(time.time() * 1000) - 1000, expired[0]))
+        assert approve_permissions(expired, expected_status=409) == "expired"
+        assert approve_permissions(change_permissions([]), "no") == "denied"
+
+        ringing = call(adapter, old_token, "start_call", dial | {"idempotencyKey": secrets.token_hex(16)})["id"]
+        assert approve_permissions(change_permissions([])) == "approved"
+        call(adapter, old_token, "start_call", dial, error="permission_disabled")
+        call(adapter, narrow_token, "send_notification", message, error="permission_disabled")
+        assert phone.get(f"/api/v1/calls/{ringing}").raise_for_status().json()["reason"] == "revoked"
+        assert approve_permissions(change_permissions(original_scopes)) == "approved"
+        after = client.get(status_url).raise_for_status().json()
+        for key in ("clientId", "sourceId", "redirectUri"):
+            assert after[key] == initial_permissions[key]
+        refreshed = client.post(token_url, data={"grant_type": "refresh_token", "refresh_token": old_grant["refresh_token"],
+                                                 "resource": resource}, auth=auth).raise_for_status().json()["access_token"]
+        assert call(adapter, refreshed, "get_request", {"id": identifier})["id"] == identifier
+        client.post(discovery["revocation_endpoint"], data={"token": refreshed}, auth=auth).raise_for_status()
+        assert client.get(resource, headers={"Authorization": "Bearer " + refreshed}).status_code == 401
+        narrow_call = call(adapter, narrow_token, "start_call", dial | {"idempotencyKey": secrets.token_hex(16)})["id"]
+        phone.post(f"/api/v1/calls/{narrow_call}/reject").raise_for_status()
         revoked_call = call(adapter, token, "start_call", dial | {"idempotencyKey": secrets.token_hex(16)})["id"]
         client.post(notify + "/api/v1/chatgpt/disconnect", json={}, headers=browser_headers).raise_for_status()
         assert phone.get(f"/api/v1/calls/{revoked_call}").raise_for_status().json()["reason"] == "revoked"
         live_bearer = {"Authorization": "Bearer " + token}
         assert client.get(resource, headers=live_bearer).status_code in (401, 403)
         assert client.get(notify + "/api/v1/chatgpt").json()["clientId"] is None
-        print("PASS OAuth, MCP, scope/ownership, elevated software signature, refresh/revocation, WAV, idempotency and call playback")
+        print("PASS OAuth, MCP, managed permissions, elevated software signature, refresh/revocation, WAV, idempotency and call playback")
 
 
 if __name__ == "__main__":

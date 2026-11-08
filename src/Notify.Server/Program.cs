@@ -103,7 +103,9 @@ _ = app.Services.GetRequiredService<ChatGptKeys>();
 await using (var scope = app.Services.CreateAsyncScope())
 {
     await scope.ServiceProvider.GetRequiredService<ChatGptDb>().Database.EnsureCreatedAsync();
-    await scope.ServiceProvider.GetRequiredService<ChatGptOAuth>().EnsureDefaultCallback();
+    var chatGpt = scope.ServiceProvider.GetRequiredService<ChatGptOAuth>();
+    await chatGpt.EnsureDefaultCallback();
+    await chatGpt.EnsureRegisteredPermissions();
 }
 if (!string.IsNullOrEmpty(settings.TrustedProxyNetwork)) app.UseForwardedHeaders();
 app.Use(async (context, next) =>

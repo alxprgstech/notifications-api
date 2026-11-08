@@ -266,7 +266,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
     }
     public Notification Respond(Actor actor, string id, SubmitAnswer request)
     {
-        actor.RequireDevice(); Sweep(); string? revokedSource = null, revokedDevice = null;
+        actor.RequireDevice(); Sweep(); string? revokedSource = null, revokedDevice = null, stopCallSource = null;
         var saved = db.Run((c, t) =>
         {
             var device = Get<Device>(c, t, "device", actor.Id); if (device is not { Revoked: false }) throw new Fault(401, "device_revoked");
@@ -294,11 +294,12 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
                 VerifySignature(device, ch, request.Signature);
                 Exec(c, t, "DELETE FROM objects WHERE kind='challenge' AND id=$i", ("$i", ch.Id));
             }
-            if (n.ManagementId != null) (revokedSource, revokedDevice) = ExecuteManagement(c, t, n.ManagementId, answer.Decision);
+            if (n.ManagementId != null) (revokedSource, revokedDevice, stopCallSource) = ExecuteManagement(c, t, n.ManagementId, answer.Decision);
             n = n with { Status = "answered", Answer = answer, AnsweredAt = Wire.Now }; Save(c, t, n); return n;
         });
         if (revokedSource != null) { agents.DisconnectSource(revokedSource); _ = calls.SourceRevokedAsync(revokedSource); }
         if (revokedDevice != null) _ = calls.DeviceRevokedAsync(revokedDevice);
+        if (stopCallSource != null) _ = calls.SourceRevokedAsync(stopCallSource);
         return saved;
     }
     public async Task<object> SendVoiceAsync(Actor actor, VoiceSend input, CancellationToken ct)
@@ -506,8 +507,9 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
     public Management BeginManagement(Actor actor, ManagementInput input)
     {
         actor.RequireOwner();
-        if (input.Action is not ("integration.create" or "integration.revoke" or "device.revoke" or "source.update" or "agent.register" or ChatGptOAuth.LinkAction) || input.Name?.Length > 80 || input.Name?.Any(char.IsControl) == true || input.TargetId?.Length > 64 || input.IconId?.Length > 64 || input.Preview is not (null or "hidden" or "full") ||
-            input.Scopes?.Any(s => s is not ("notify:send" or "requests:create" or "requests:read" or "requests:cancel" or "icons:write" or "agents:connect")) == true ||
+        var updatesPermissions = input.Action == ChatGptOAuth.PermissionsAction;
+        if (input.Action is not ("integration.create" or "integration.revoke" or "device.revoke" or "source.update" or "agent.register" or ChatGptOAuth.LinkAction or ChatGptOAuth.PermissionsAction) || input.Name?.Length > 80 || input.Name?.Any(char.IsControl) == true || input.TargetId?.Length > 64 || input.IconId?.Length > 64 || input.Preview is not (null or "hidden" or "full") ||
+            (!updatesPermissions && (input.ExpectedRevision != null || input.Scopes?.Any(s => s is not ("notify:send" or "requests:create" or "requests:read" or "requests:cancel" or "icons:write" or "agents:connect")) == true)) ||
             input.Capabilities?.Length > 3 || input.Capabilities?.Any(c => c is not ("text_tasks" or "voice_messages" or "realtime_audio")) == true || input.Capabilities?.Distinct(StringComparer.Ordinal).Count() != input.Capabilities?.Length) throw new Fault(400, "invalid_management_action");
         if (input.Action == "integration.create" && (string.IsNullOrWhiteSpace(input.Name) || input.Scopes is not { Length: > 0 })) throw new Fault(400, "invalid_integration");
         if (input.Action == "agent.register" && (string.IsNullOrWhiteSpace(input.Name) || input.Capabilities is not { Length: > 0 } || input.Scopes != null || input.Preview != null || input.WebhookUrl != null || input.IconId != null)) throw new Fault(400, "invalid_agent");
@@ -516,9 +518,28 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             if (actor.Kind != "web") throw new Fault(403, "web_required");
             if (input != new ManagementInput(ChatGptOAuth.LinkAction)) throw new Fault(400, "invalid_management_action");
         }
+        else if (updatesPermissions)
+        {
+            if (actor.Kind != "web") throw new Fault(403, "web_required");
+            if (input.TargetId is not { Length: 32 } || input.ExpectedRevision is not >= 0 ||
+                input.Scopes is not { } scopes || scopes.Length > ChatGptOAuth.PermissionsForSource.Length ||
+                scopes.Any(s => !ChatGptOAuth.PermissionsForSource.Contains(s)) ||
+                scopes.Distinct(StringComparer.Ordinal).Count() != scopes.Length ||
+                input != new ManagementInput(input.Action, TargetId: input.TargetId, Scopes: scopes, ExpectedRevision: input.ExpectedRevision))
+                throw new Fault(400, "invalid_chatgpt_permissions");
+            input = input with { Scopes = ChatGptOAuth.PermissionsForSource.Where(scopes.Contains).ToArray() };
+        }
         else if (input.Action != "integration.create" && input.TargetId == null) throw new Fault(400, "target_required");
         return db.Run((c, t) =>
         {
+            string? permissionDescription = null;
+            if (updatesPermissions)
+            {
+                var target = ChatGptOAuth.PermissionTarget(c, t, input) ?? throw new Fault(409, "chatgpt_permissions_changed");
+                if (target.Link.PermissionsRevision > 0 && target.Source.Scopes.ToHashSet(StringComparer.Ordinal).SetEquals(input.Scopes!))
+                    throw new Fault(400, "chatgpt_permissions_unchanged");
+                permissionDescription = ChatGptOAuth.PermissionChangeDescription(target.Source.Scopes, input.Scopes!);
+            }
             if (!All<Device>(c, t, "device").Any(d => !d.Revoked)) throw new Fault(409, "trusted_device_required");
             using (var count = Cmd(c, t, "SELECT count(*) FROM objects WHERE kind='management' AND json_extract(data,'$.status')='pending' AND json_extract(data,'$.expiresAt')>$n", ("$n", Wire.Now)))
                 if ((long)count.ExecuteScalar()! >= 20) throw new Fault(429, "too_many_pending_management_requests");
@@ -533,7 +554,8 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             var m = new Management(Wire.Id(), actor.SessionId ?? actor.Id, input, Wire.Now + 300000); Put(c, t, "management", m.Id, m);
             var description = input.Action switch
             {
-                ChatGptOAuth.LinkAction => "Выдать ChatGPT доступ к выделенному источнику Notify. ChatGPT сможет отправлять сообщения и запрашивать, читать и отменять свои подтверждения и формы. Прежнее подключение ChatGPT будет отозвано.",
+                ChatGptOAuth.LinkAction => "Выдать ChatGPT доступ к выделенному источнику Notify. ChatGPT сможет отправлять уведомления, управлять своими запросами и звонить с озвучкой. Прежнее подключение ChatGPT будет отозвано.",
+                ChatGptOAuth.PermissionsAction => permissionDescription!,
                 "integration.create" => "Создать доступ для «" + input.Name + "». Права: " + string.Join(", ", input.Scopes!.Select(s => s switch { "notify:send" => "сообщения", "requests:create" => "запросы подтверждения", "requests:read" => "чтение своих результатов", "requests:cancel" => "отмена своих запросов", "agents:connect" => "подключение агента", _ => "загрузка иконок" })) + (input.WebhookUrl == null ? "" : ". Доставлять ответы на " + input.WebhookUrl),
                 "integration.revoke" => "Отозвать доступ интеграции «" + (Get<Source>(c, t, "source", input.TargetId!)?.Name ?? "Неизвестный источник") + "».",
                 "device.revoke" => "Отозвать устройство «" + (Get<Device>(c, t, "device", input.TargetId!)?.Name ?? "Неизвестное устройство") + "».",
@@ -561,21 +583,28 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             var m = Get<Management>(c, t, "management", id);
             if (m == null || m.SessionId != (actor.SessionId ?? actor.Id))
                 throw new Fault(404, "management_not_found");
-            if (m.ProtectedResult == null) return (object)new { m.Id, m.Status };
+            if (m.ProtectedResult == null) return (object)new { m.Id, Status = m.Status == "pending" && m.ExpiresAt <= Wire.Now ? "expired" : m.Status };
             if (deferChatGpt && m.Input.Action == ChatGptOAuth.LinkAction) return null;
             Put(c, t, "management", id, m with { ProtectedResult = null }); return new { m.Id, m.Status, result = Wire.Decode<System.Text.Json.JsonElement>(Unprotect(m.ProtectedResult)) };
         });
     }
-    private (string? Source, string? Device) ExecuteManagement(SqliteConnection c, SqliteTransaction t, string id, string decision)
+    private (string? Source, string? Device, string? StopCallSource) ExecuteManagement(SqliteConnection c, SqliteTransaction t, string id, string decision)
     {
         var m = Get<Management>(c, t, "management", id) ?? throw new Fault(409, "management_not_found");
         if (m.Status != "pending" || m.ExpiresAt <= Wire.Now) throw new Fault(409, "management_expired");
-        if (decision != "yes") { Put(c, t, "management", id, m with { Status = "denied" }); return (null, null); }
-        object result = new { ok = true }; var input = m.Input; string? revokedSource = null, revokedDevice = null;
+        if (decision != "yes") { Put(c, t, "management", id, m with { Status = "denied" }); return (null, null, null); }
+        object result = new { ok = true }; var input = m.Input; string? revokedSource = null, revokedDevice = null, stopCallSource = null;
         switch (input.Action)
         {
             case ChatGptOAuth.LinkAction:
                 result = ChatGptOAuth.ApproveLink(c, t, Protect, out revokedSource); break;
+            case ChatGptOAuth.PermissionsAction:
+                if (!ChatGptOAuth.ApplyPermissions(c, t, input, out stopCallSource))
+                {
+                    Put(c, t, "management", id, m with { Status = "conflict" });
+                    return (null, null, null);
+                }
+                break;
             case "integration.create":
                 var sid = Wire.Id(); var secret = input.WebhookUrl == null ? null : Wire.Secret();
                 Put(c, t, "source", sid, new Source(sid, input.Name!, input.Scopes!, input.Preview ?? "hidden", input.IconId, input.WebhookUrl, secret == null ? null : Protect(secret)));
@@ -600,7 +629,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
                 Put(c, t, "agent", agent.Id, agent); result = new { agentId = agent.Id, sourceId = owner.Id }; break;
         }
         Put(c, t, "management", id, m with { Status = "approved", ProtectedResult = Protect(Wire.Encode(result)) });
-        return (revokedSource, revokedDevice);
+        return (revokedSource, revokedDevice, stopCallSource);
     }
     public static Icon RequireIcon(SqliteConnection c, SqliteTransaction t, string id, Actor actor)
     {

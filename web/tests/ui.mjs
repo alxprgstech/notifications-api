@@ -164,7 +164,11 @@ try {
   const fixtures = {
     session: { actor: { kind: 'web' }, csrfToken: fixtureToken },
     chatgpt: { url: 'https://notify.alxprgs.tech/chatgpt/mcp', clientId: null, redirectUri: null,
-      defaultRedirectUri: 'https://chatgpt.com/connector_platform_oauth_redirect' },
+      defaultRedirectUri: 'https://chatgpt.com/connector_platform_oauth_redirect', sourceId: null, scopes: [],
+      permissionsRevision: 0, availablePermissions: [
+        { scope: 'notify:send', label: 'Отправка текстовых и голосовых уведомлений' },
+        { scope: 'calls:start', label: 'Звонки с озвучкой' },
+      ] },
     sources, devices,
     agents: [{ id: 'agent1', sourceId: 'fixture', name: 'Агент разработки', capabilities: ['text_tasks', 'realtime_audio'],
       revoked: false, online: true, lastSeenAt: now, sessions: [{ id: 'task1', name: 'Сборка' }] }],
@@ -217,10 +221,18 @@ try {
         const action = changes.at(-1).action;
         if (action === 'chatgpt.link') {
           fixtures.chatgpt.clientId = 'synthetic-chatgpt-client';
+          fixtures.chatgpt.sourceId = 'synthetic-chatgpt-source';
+          fixtures.chatgpt.scopes = ['notify:send'];
           fixtures.chatgpt.redirectUri = fixtures.chatgpt.defaultRedirectUri;
           return await route.fulfill({ json: { status: 'approved', result: {
             clientId: fixtures.chatgpt.clientId, clientSecret: 'synthetic-chatgpt-secret',
           } } });
+        }
+        if (action === 'chatgpt.permissions.update') {
+          if (++pollCount === 1) return await route.fulfill({ json: { status: 'pending' } });
+          fixtures.chatgpt.scopes = changes.at(-1).scopes;
+          fixtures.chatgpt.permissionsRevision++;
+          return await route.fulfill({ json: { status: 'approved' } });
         }
         if (action === 'integration.create') {
           if (++pollCount === 1) {
@@ -246,7 +258,7 @@ try {
       assert.equal(request.method(), 'POST');
       assert.equal(request.headers()['x-csrf-token'], fixtureToken);
       if (path.endsWith('/callback')) fixtures.chatgpt.redirectUri = request.postDataJSON().redirectUri;
-      else Object.assign(fixtures.chatgpt, { clientId: null, redirectUri: null });
+      else Object.assign(fixtures.chatgpt, { clientId: null, redirectUri: null, sourceId: null, scopes: [] });
       return route.fulfill({ status: 204 });
     }
     if (Object.hasOwn(fixtures, path)) return route.fulfill({ json: fixtures[path] });
@@ -383,6 +395,26 @@ try {
   await button('Сохранить callback').click();
   await button('Сохранить callback').waitFor();
   assert.equal(await callback.inputValue(), 'https://chatgpt.com/connector/oauth/example');
+  const callsPermission = page.getByRole('checkbox', { name: 'Звонки с озвучкой' });
+  const savePermissions = button('Сохранить разрешения');
+  await savePermissions.and(page.locator(':enabled')).waitFor();
+  assert.equal(await callsPermission.isChecked(), false);
+  await callsPermission.check();
+  await savePermissions.click();
+  await page.waitForFunction(() => {
+    const checkbox = Array.from(document.querySelectorAll('label')).find(label => label.textContent.includes('Звонки с озвучкой'))?.querySelector('input');
+    return checkbox?.matches(':disabled') && !checkbox.checked;
+  });
+  assert.deepEqual(changes.at(-1), {
+    action: 'chatgpt.permissions.update', targetId: 'synthetic-chatgpt-source', expectedRevision: 0,
+    scopes: ['notify:send', 'calls:start'],
+  });
+  await page.waitForFunction(() => {
+    const checkbox = Array.from(document.querySelectorAll('label')).find(label => label.textContent.includes('Звонки с озвучкой'))?.querySelector('input');
+    return checkbox?.checked && !checkbox.matches(':disabled');
+  });
+  assert.equal(await page.getByLabel('OAuth Client ID').inputValue(), 'synthetic-chatgpt-client');
+  assert.equal(await chatgpt.count(), 0);
   await button('Отключить').click();
   await page.getByRole('dialog', { name: 'Отключить ChatGPT?' }).getByRole('button', { name: 'Отключить ChatGPT' }).click();
   await button('Подключить ChatGPT').waitFor();
@@ -433,7 +465,7 @@ try {
   await button('Открыть меню').click();
   await menu.getByRole('button', { name: 'Выйти' }).click();
   await login.waitFor();
-  assert.equal(changes.length, 6);
+  assert.equal(changes.length, 7);
   assert.deepEqual(errors, []);
   assert.deepEqual(external, [], 'Notify attempted external asset requests');
   await writeFile(new URL('result.json', artifact), JSON.stringify({

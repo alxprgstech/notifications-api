@@ -24,6 +24,7 @@ export type Call = {
 };
 export type ManagementInput =
   | { action: 'chatgpt.link' }
+  | { action: 'chatgpt.permissions.update'; targetId: string; expectedRevision: number; scopes: string[] }
   | { action: 'integration.create'; name: string; scopes: string[]; webhookUrl: string | null }
   | { action: 'source.update'; targetId: string; preview: 'full' | 'hidden' }
   | { action: 'integration.revoke' | 'device.revoke'; targetId: string }
