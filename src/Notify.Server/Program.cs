@@ -301,7 +301,7 @@ public sealed class LocalAuthentication(IOptionsMonitor<AuthenticationSchemeOpti
     }
 }
 [McpServerToolType]
-public sealed class NotifyTools(NotificationService service, IHttpContextAccessor context, ChatGptVoice voice)
+public sealed class NotifyTools(NotificationService service, IHttpContextAccessor context, ChatGptVoice voice, ChatGptCall calls)
 {
     private bool IsChatGpt => context.HttpContext?.Request.Path == ChatGptOAuth.McpPath;
 
@@ -320,6 +320,9 @@ public sealed class NotifyTools(NotificationService service, IHttpContextAccesso
         context.HttpContext?.Request.Path == ChatGptOAuth.McpPath
             ? voice.Send(Actor, title, text, expiresAt, idempotencyKey, cancellationToken)
             : throw new Fault(404, "unknown_tool");
+    [McpServerTool, System.ComponentModel.Description("Ring the owner's Android phone. If accepted, read up to 300 characters of Russian text aloud using Silero and hang up. The initial result is a call state, not proof of acceptance or playback. Repeat the same arguments and idempotency key to check status without redialing.")]
+    public Task<string> StartCall(string title, string text, string idempotencyKey, CancellationToken cancellationToken) =>
+        IsChatGpt ? calls.Start(Actor, title, text, idempotencyKey, cancellationToken) : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Send an informational notification. Requires an idempotency key. Does not request approval.")]
     public string SendNotification(string title, string body, string idempotencyKey, string? iconId = null, string? correlationId = null) =>
         Run(() => service.Create(Actor, new CreateNotification("message", title, body, IconId: iconId, CorrelationId: correlationId), idempotencyKey));

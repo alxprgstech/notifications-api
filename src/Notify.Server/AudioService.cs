@@ -154,12 +154,15 @@ public sealed class AudioService(Database db, Settings settings, ILogger<AudioSe
     }
     public static void TryDelete(string path) { try { if (File.Exists(path)) File.Delete(path); } catch { } }
 
-    public static int ValidateWav(Stream stream, long fileLength)
+    public static int ValidateWav(Stream stream, long fileLength) => ValidateWav(stream, fileLength, out _, out _);
+
+    internal static int ValidateWav(Stream stream, long fileLength, out int dataOffset, out int dataLength)
     {
         if (fileLength < 44 || fileLength > MaxBytes) throw new Fault(fileLength > MaxBytes ? 413 : 400, fileLength > MaxBytes ? "audio_too_large" : "invalid_audio");
         var header = new byte[12]; ReadExactly(stream, header);
         if (!header.AsSpan(0, 4).SequenceEqual("RIFF"u8) || !header.AsSpan(8, 4).SequenceEqual("WAVE"u8) || BitConverter.ToInt32(header, 4) != fileLength - 8) throw new Fault(400, "invalid_audio");
         int? format = null, channels = null, rate = null, byteRate = null, blockAlign = null, bits = null; long dataSize = -1;
+        dataOffset = 0;
         var chunk = new byte[8];
         while (stream.Position + 8 <= fileLength)
         {
@@ -175,7 +178,7 @@ public sealed class AudioService(Database db, Settings settings, ILogger<AudioSe
             else if (id == "data")
             {
                 if (dataSize >= 0) throw new Fault(400, "invalid_audio");
-                dataSize = size; stream.Position += size;
+                dataOffset = (int)stream.Position; dataSize = size; stream.Position += size;
             }
             else stream.Position += size;
             if ((size & 1) == 1) { if (stream.Position >= fileLength) throw new Fault(400, "invalid_audio"); stream.Position++; }
@@ -184,6 +187,7 @@ public sealed class AudioService(Database db, Settings settings, ILogger<AudioSe
         var duration = dataSize * 1000L / 32000;
         if (duration <= 0) throw new Fault(400, "invalid_audio");
         if (duration > MaxDurationMs) throw new Fault(400, "audio_too_long");
+        dataLength = (int)dataSize;
         return (int)duration;
     }
     private static void ReadExactly(Stream stream, byte[] buffer)

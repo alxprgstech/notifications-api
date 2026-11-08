@@ -7,8 +7,7 @@ using static Notify.Database;
 
 namespace Notify;
 
-// Signaling over the agent control socket, media over two outbound WebSockets. Audio is relayed in
-// memory only: no STT/TTS, no transcoding, no durable queues, no recordings.
+// Media stays in memory. Calls use an agent WebSocket or an in-process playback peer.
 public sealed class CallService
 {
     public const string Protocol = "alxprgs.notify.call.v2";
@@ -27,7 +26,7 @@ public sealed class CallService
         agents.ControlEvent += HandleAgentFrame; agents.DisconnectedEvent += HandleAgentDisconnected;
     }
 
-    private sealed class Call(string id, string inviteId, string direction, string sourceId, string agentId, string agentName, string? deviceId, string? sessionId, string securityLevel, string title, string? iconId)
+    private sealed class Call(string id, string inviteId, string direction, string sourceId, string agentId, string agentName, string? deviceId, string? sessionId, string securityLevel, string title, string? iconId, ReadOnlyMemory<byte> playback = default)
     {
         public string Id { get; } = id;
         public string InviteId { get; } = inviteId;
@@ -40,9 +39,43 @@ public sealed class CallService
         public string SecurityLevel { get; } = securityLevel;
         public string Title { get; } = title;
         public string? IconId { get; } = iconId;
+        public ReadOnlyMemory<byte> Playback { get; } = playback;
+        public TaskCompletionSource? PlaybackSent { get; } = playback.IsEmpty ? null : new(TaskCreationOptions.RunContinuationsAsynchronously);
         public long StartedAt { get; } = Wire.Now; public long? ActiveAt, EndedAt; public string Status = "ringing"; public string? Reason;
         public int PlaybackGeneration;
         public bool Ended; public CancellationTokenSource Cts { get; } = new(); public MediaSide? Phone, AgentMedia;
+    }
+
+    internal void EnsureIdle()
+    {
+        lock (sync) { if (currentId != null) throw new Fault(409, "busy"); }
+    }
+
+    internal object StartPlayback(Actor actor, string title, ReadOnlyMemory<byte> pcm, string attemptId, string fingerprint)
+    {
+        Call call;
+        lock (sync)
+        {
+            if (currentId != null) throw new Fault(409, "busy");
+            call = db.Run((c, t) =>
+            {
+                var source = Get<Source>(c, t, "source", actor.Id);
+                if (source is not { Revoked: false } || !source.Scopes.Contains(ChatGptCall.Scope))
+                    throw new Fault(403, "insufficient_scope");
+                var created = new Call(Wire.Id(), Wire.Id(), "incoming", source.Id, source.Id, source.Name,
+                    null, null, "standard", title, source.IconId, pcm);
+                // A restart interrupts playback, but a retry must still resolve to this call.
+                Put(c, t, "call", created.Id, new CallRecord(created.Id, source.Id, created.AgentId, null, null,
+                    created.SecurityLevel, created.StartedAt, created.StartedAt, "ended", "interrupted", 0, created.Direction));
+                Put(c, t, ChatGptCall.AttemptKind, attemptId, new ChatGptCallAttempt(fingerprint, created.Id, created.StartedAt));
+                return created;
+            });
+            calls[call.Id] = call;
+            currentId = call.Id;
+        }
+        _ = RingTimerAsync(call);
+        _ = PushCallAsync(call, "ringing");
+        return View(call);
     }
     private sealed class MediaSide(WebSocket socket, CancellationToken lifetime, int queueFrames, string name)
     {
@@ -51,6 +84,8 @@ public sealed class CallService
         public BoundedFrameQueue Outbound { get; } = new(queueFrames);
         public SemaphoreSlim SendLock { get; } = new(1, 1);
         public CancellationTokenSource Cts { get; } = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        public CancellationTokenSource ReceiveCts { get; } = new();
+        public TaskCompletionSource PeerClosed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Closed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public long LastSeq = -1, LastTimestamp = -1;
         public async Task<bool> TextAsync(string json, CancellationToken ct = default)
@@ -154,7 +189,8 @@ public sealed class CallService
             call.DeviceId = actor.Id; call.Status = "connecting";
         }
         _ = MediaTimerAsync(call);
-        await agents.SendControlAsync(call.AgentId, "call.accepted", new { callId = call.Id, inviteId = call.InviteId, deviceId = actor.Id, deviceName });
+        if (call.Playback.IsEmpty)
+            await agents.SendControlAsync(call.AgentId, "call.accepted", new { callId = call.Id, inviteId = call.InviteId, deviceId = actor.Id, deviceName });
         _ = PushCallAsync(call, "accepted");
         return View(call);
     }
@@ -163,8 +199,7 @@ public sealed class CallService
         actor.RequireDevice();
         Call? call; lock (sync) calls.TryGetValue(id, out call);
         if (call == null || call.Direction != "incoming") throw new Fault(404, "call_not_found");
-        lock (sync) { if (call.Ended || call.Status != "ringing" || call.DeviceId != null) throw new Fault(409, "call_taken"); }
-        await EndAsync(call, "rejected");
+        if (!await EndAsync(call, "rejected", expectedStatus: "ringing")) throw new Fault(409, "call_taken");
     }
 
     private async Task DialAsync(Agent agent, JsonElement frame, JsonElement payload)
@@ -264,15 +299,15 @@ public sealed class CallService
 
     public async Task AttachPhoneAsync(Actor actor, string id, WebSocket socket, CancellationToken ct)
     {
-        RequirePhone(actor, id);
-        Call? found; lock (sync) calls.TryGetValue(id, out found); var call = found!;
-        await AttachAsync(call, socket, phone: true, ct);
+        await AttachAsync(PhoneCall(actor, id), socket, phone: true, ct);
     }
-    public void RequirePhone(Actor actor, string id)
+    public void RequirePhone(Actor actor, string id) => PhoneCall(actor, id);
+    private Call PhoneCall(Actor actor, string id)
     {
         actor.RequireDevice(); Call? call; lock (sync) calls.TryGetValue(id, out call);
         if (call == null || call.DeviceId != actor.Id) throw new Fault(404, "call_not_found");
         lock (sync) { if (call.Ended || call.Status is not ("connecting" or "active")) throw new Fault(409, "call_not_ready"); if (call.Phone != null) throw new Fault(409, "already_attached"); }
+        return call;
     }
     public async Task AttachAgentAsync(Actor actor, string id, WebSocket socket, CancellationToken ct)
     {
@@ -285,7 +320,7 @@ public sealed class CallService
         if (actor.Kind != "integration" || !actor.Scopes.Contains("agents:connect")) throw new Fault(403, "agents_scope_required");
         var agent = agents.ForSource(actor.Id) ?? throw new Fault(403, "agent_not_registered");
         Call? call; lock (sync) calls.TryGetValue(id, out call);
-        if (call == null || call.AgentId != agent.Id) throw new Fault(404, "call_not_found");
+        if (call == null || !call.Playback.IsEmpty || call.AgentId != agent.Id) throw new Fault(404, "call_not_found");
         lock (sync) { if (call.Ended || call.Status is not ("connecting" or "active")) throw new Fault(409, "call_not_ready"); if (call.AgentMedia != null) throw new Fault(409, "already_attached"); }
     }
 
@@ -299,7 +334,7 @@ public sealed class CallService
             if (call.Status is not ("connecting" or "active")) throw new Fault(409, "call_not_ready");
             if (phone ? call.Phone != null : call.AgentMedia != null) throw new Fault(409, "already_attached");
             if (phone) call.Phone = side; else call.AgentMedia = side;
-            both = call.Phone != null && call.AgentMedia != null;
+            both = call.Phone != null && (call.AgentMedia != null || !call.Playback.IsEmpty);
             if (both && call.Status == "connecting") { call.Status = "active"; call.ActiveAt = Wire.Now; }
         }
         _ = SendLoopAsync(call, side);
@@ -308,10 +343,42 @@ public sealed class CallService
         if (both)
         {
             _ = MaxTimerAsync(call);
-            if (call.Phone != null) await call.Phone.TextAsync(Wire.Encode(new { type = "state", status = "active" }));
-            await agents.SendControlAsync(call.AgentId, "call.active", new { callId = call.Id, inviteId = call.InviteId });
+            var notified = await call.Phone!.TextAsync(Wire.Encode(new { type = "state", status = "active" }), call.Cts.Token);
+            if (call.Playback.IsEmpty)
+                await agents.SendControlAsync(call.AgentId, "call.active", new { callId = call.Id, inviteId = call.InviteId });
+            else if (notified)
+                _ = PlayAsync(call, side);
+            else
+                await EndAsync(call, "disconnected");
         }
         await side.Closed.Task;
+    }
+
+    private async Task PlayAsync(Call call, MediaSide phone)
+    {
+        try
+        {
+            var pcm = call.Playback;
+            for (var offset = 0; offset < pcm.Length; offset += AudioBytes)
+            {
+                call.Cts.Token.ThrowIfCancellationRequested();
+                var frame = new byte[FrameBytes];
+                BinaryPrimitives.WriteUInt32BigEndian(frame, (uint)(offset / AudioBytes));
+                BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(4), (uint)(offset / AudioBytes * 20));
+                pcm.Span.Slice(offset, Math.Min(AudioBytes, pcm.Length - offset)).CopyTo(frame.AsSpan(HeaderBytes));
+                if (!phone.Outbound.TryEnqueue(frame))
+                {
+                    await EndAsync(call, "degraded");
+                    return;
+                }
+                await Task.Delay(20, call.Cts.Token);
+            }
+            await call.PlaybackSent!.Task.WaitAsync(TimeSpan.FromSeconds(2), call.Cts.Token);
+            await Task.Delay(350, call.Cts.Token);
+            await EndAsync(call, "playback_sent");
+        }
+        catch (OperationCanceledException) when (call.Cts.IsCancellationRequested) { }
+        catch (TimeoutException) { await EndAsync(call, "degraded"); }
     }
 
     private async Task ReceiveLoopAsync(Call call, MediaSide side, bool phone)
@@ -319,23 +386,32 @@ public sealed class CallService
         var buffer = new byte[64 * 1024];
         try
         {
-            while (!side.Cts.IsCancellationRequested && side.Socket.State == WebSocketState.Open)
+            while (side.Socket.State is WebSocketState.Open or WebSocketState.CloseSent)
             {
-                var result = await side.Socket.ReceiveAsync(new ArraySegment<byte>(buffer), side.Cts.Token);
-                if (result.MessageType == WebSocketMessageType.Close) { await EndAsync(call, "disconnected"); return; }
+                // Cancelling a pending WebSocket receive aborts the connection. Bounded shutdown
+                // sends the final state first, then closes the socket and unblocks this receive.
+                var result = await side.Socket.ReceiveAsync(new ArraySegment<byte>(buffer), side.ReceiveCts.Token);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    side.PeerClosed.TrySetResult();
+                    await EndAsync(call, "disconnected");
+                    return;
+                }
+                if (side.Cts.IsCancellationRequested) continue;
                 if (result.MessageType != WebSocketMessageType.Binary || !result.EndOfMessage || !ValidFrame(buffer, result.Count, side, out var generation)) { await EndAsync(call, "invalid_audio"); return; }
                 bool active; lock (sync) active = call.Status == "active" && !call.Ended;
                 if (!active) continue;
+                if (phone && !call.Playback.IsEmpty) continue;
                 if (!phone && generation < (uint)call.PlaybackGeneration) continue;
                 var peer = phone ? call.AgentMedia : call.Phone;
                 var frame = new byte[FrameBytes]; Buffer.BlockCopy(buffer, 0, frame, 0, FrameBytes);
                 if (peer == null || !peer.Outbound.TryEnqueue(frame)) { await EndAsync(call, "degraded"); return; }
             }
+            if (!side.Cts.IsCancellationRequested) await EndAsync(call, "disconnected");
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (side.ReceiveCts.IsCancellationRequested) { }
         catch (WebSocketException e) { log.LogWarning("Call {CallId} media receive closed on {Side}: {Message} state={State} close={Close}", call.Id, side.Name, e.Message, side.Socket.State, side.Socket.CloseStatus); await EndAsync(call, "disconnected"); }
         catch (Exception e) { log.LogWarning("Call {CallId} media receive failed: {Type}", call.Id, e.GetType().Name); await EndAsync(call, "disconnected"); }
-        finally { side.Closed.TrySetResult(); }
     }
     private async Task SendLoopAsync(Call call, MediaSide side)
     {
@@ -349,14 +425,18 @@ public sealed class CallService
                 try
                 {
                     if (side.Name == "phone" && TryGeneration(frame, out var generation) && generation < (uint)call.PlaybackGeneration) continue;
-                    if (side.Socket.State == WebSocketState.Open) await side.Socket.SendAsync(new ArraySegment<byte>(frame), WebSocketMessageType.Binary, true, side.Cts.Token);
+                    if (side.Socket.State == WebSocketState.Open)
+                    {
+                        await side.Socket.SendAsync(new ArraySegment<byte>(frame), WebSocketMessageType.Binary, true, side.Cts.Token);
+                        if (call.PlaybackSent != null && BinaryPrimitives.ReadUInt32BigEndian(frame) == (call.Playback.Length - 1) / AudioBytes)
+                            call.PlaybackSent.TrySetResult();
+                    }
                 }
                 finally { side.SendLock.Release(); }
             }
         }
         catch (OperationCanceledException) { }
         catch (Exception e) { log.LogWarning("Call {CallId} media send failed on {Side}: {Type} state={State} close={Close} message={Message}", call.Id, side.Name, e.GetType().Name, side.Socket.State, side.Socket.CloseStatus, e.Message); await EndAsync(call, "disconnected"); }
-        finally { side.Closed.TrySetResult(); }
     }
     private static bool ValidFrame(byte[] buffer, int count, MediaSide side, out uint generation)
     {
@@ -380,7 +460,7 @@ public sealed class CallService
             var callId = payload.TryGetProperty("callId", out var value) ? value.GetString() : null;
             if (callId == null) return;
             Call? call; lock (sync) calls.TryGetValue(callId, out call);
-            if (call == null || call.AgentId != agent.Id) return;
+            if (call == null || !call.Playback.IsEmpty || call.AgentId != agent.Id) return;
             switch (type)
             {
                 case "call.accept": await AcceptByAgentAsync(call); break;
@@ -425,14 +505,12 @@ public sealed class CallService
     private async Task RingTimerAsync(Call call)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(settings.CallRingSeconds), call.Cts.Token); } catch (OperationCanceledException) { return; }
-        lock (sync) { if (call.Ended || call.Status != "ringing") return; }
-        await EndAsync(call, "missed");
+        await EndAsync(call, "missed", expectedStatus: "ringing");
     }
     private async Task MediaTimerAsync(Call call)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(settings.CallMediaConnectSeconds), call.Cts.Token); } catch (OperationCanceledException) { return; }
-        lock (sync) { if (call.Ended || call.Status != "connecting") return; }
-        await EndAsync(call, "timeout");
+        await EndAsync(call, "timeout", expectedStatus: "connecting");
     }
     private async Task MaxTimerAsync(Call call)
     {
@@ -441,12 +519,12 @@ public sealed class CallService
         await EndAsync(call, "timeout");
     }
 
-    private async Task EndAsync(Call call, string reason)
+    private async Task<bool> EndAsync(Call call, string reason, string? expectedStatus = null)
     {
         MediaSide? phone, agentMedia; string? deviceId;
         lock (sync)
         {
-            if (call.Ended) return;
+            if (call.Ended || expectedStatus != null && call.Status != expectedStatus) return false;
             call.Ended = true; call.Status = "ended"; call.Reason = reason; call.EndedAt = Wire.Now;
             if (currentId == call.Id) currentId = null;
             phone = call.Phone; agentMedia = call.AgentMedia; deviceId = call.DeviceId;
@@ -463,7 +541,9 @@ public sealed class CallService
             catch (Exception e) { log.LogWarning("Call {CallId} history write failed: {Type}", call.Id, e.GetType().Name); }
             if (call.Direction == "incoming") _ = PushCallAsync(call, reason is "rejected" or "missed" or "disconnected" or "revoked" ? reason : "ended");
             await CallShutdown.RunAsync(
-                ct => agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, reason }, ct),
+                ct => call.Playback.IsEmpty
+                    ? agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, reason }, ct)
+                    : Task.CompletedTask,
                 ct => phone?.TextAsync(Wire.Encode(new { type = "ended", reason }), ct) ?? Task.CompletedTask,
                 () => CloseSide(phone, reason), () => CloseSide(agentMedia, reason),
                 TimeSpan.FromSeconds(2));
@@ -472,6 +552,7 @@ public sealed class CallService
         {
             lock (sync) calls.Remove(call.Id);
         }
+        return true;
     }
     private static async Task CloseSide(MediaSide? side, string reason)
     {
@@ -480,11 +561,16 @@ public sealed class CallService
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            if (side.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived) await side.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, reason.Length > 100 ? reason[..100] : reason, cts.Token);
+            if (side.Socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                await side.Socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, reason.Length > 100 ? reason[..100] : reason, cts.Token);
+            if (side.Socket.State == WebSocketState.CloseSent) await side.PeerClosed.Task.WaitAsync(cts.Token);
         }
         catch { }
-        try { side.Socket.Abort(); } catch { }
-        side.Socket.Dispose();
+        if (side.Socket.State != WebSocketState.Closed)
+            try { side.Socket.Abort(); } catch { }
+        side.ReceiveCts.Cancel();
+        try { side.Socket.Dispose(); }
+        finally { side.Closed.TrySetResult(); }
     }
     private async Task PushCallAsync(Call call, string state)
     {

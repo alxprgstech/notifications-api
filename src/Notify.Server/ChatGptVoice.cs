@@ -7,7 +7,7 @@ namespace Notify;
 
 internal sealed record ChatGptVoiceAttempt(string Fingerprint, string UploadId, long CreatedAt);
 
-public sealed class ChatGptVoice(Database db, AudioService audio, NotificationService notify, IHttpClientFactory clients)
+public sealed class ChatGptVoice(Database db, AudioService audio, NotificationService notify, SileroSpeech speech)
 {
     private readonly SemaphoreSlim[] gates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1)).ToArray();
 
@@ -35,7 +35,8 @@ public sealed class ChatGptVoice(Database db, AudioService audio, NotificationSe
             }
             var now = DateTimeOffset.UtcNow;
             if (expiresAt <= now || expiresAt > now.AddDays(30)) throw new McpException("invalid_notification");
-            var upload = await Synthesize(actor, text, ct);
+            var upload = (await speech.WithWav(text, AudioService.MaxBytes,
+                (stream, length, token) => audio.UploadAsync(actor, stream, length, token), ct)).UploadId;
             db.Run((c, t) => { Put(c, t, "chatgpt_voice", id, new ChatGptVoiceAttempt(fingerprint, upload, Wire.Now)); return 0; });
             return Create(upload);
         }
@@ -46,7 +47,12 @@ public sealed class ChatGptVoice(Database db, AudioService audio, NotificationSe
             new CreateNotification("voice", title, "", ExpiresAt: expiresAt, VoiceUpload: new VoiceInput(uploadId)), key));
     }
 
-    private async Task<string> Synthesize(Actor actor, string text, CancellationToken ct)
+}
+
+public sealed class SileroSpeech(IHttpClientFactory clients)
+{
+    internal async Task<T> WithWav<T>(string text, long maxBytes,
+        Func<Stream, long, CancellationToken, Task<T>> consume, CancellationToken ct)
     {
         using var client = clients.CreateClient("silero");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -60,10 +66,10 @@ public sealed class ChatGptVoice(Database db, AudioService audio, NotificationSe
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             var length = response.Content.Headers.ContentLength;
             if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType != "audio/wav" ||
-                length is not (> 44 and <= AudioService.MaxBytes))
+                length is not > 44 || length > maxBytes)
                 throw new McpException("silero_unavailable");
             await using var stream = await response.Content.ReadAsStreamAsync(deadline.Token);
-            return (await audio.UploadAsync(actor, stream, length, deadline.Token)).UploadId;
+            return await consume(stream, length.Value, deadline.Token);
         }
         catch (HttpRequestException) { throw new McpException("silero_unavailable"); }
         catch (IOException) { throw new McpException("silero_unavailable"); }

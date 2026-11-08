@@ -31,12 +31,19 @@ docker compose --env-file $notifyEnv -f compose.yml -f compose.home.yml -f compo
 | Инструменты | Право |
 | --- | --- |
 | `send_notification`, `send_voice` | `notify:send` |
+| `start_call` | `calls:start` |
 | `request_confirmation`, `request_form` | `requests:create` |
 | `get_request`, `wait_for_response` | `requests:read` |
 | `cancel_request` | `requests:cancel` |
 
 `send_voice(title, text, expiresAt, idempotencyKey)` принимает до 1 000 символов русского текста. Для повторов сохраняйте исходный ключ и аргументы. При отказе Silero остаются доступны текстовые инструменты. Повышенные подтверждения требуют системной биометрии или PIN и подписи Android.
 
+`start_call(title, text, idempotencyKey)` синтезирует до 300 символов русского текста через Silero и вызывает доверенные телефоны Notify. После ручного принятия и подключения Android сервер передаёт фразу по медиа-протоколу звонка v2 и завершает вызов. Android использует обычный экран вызова с доступом к микрофону после принятия. Сервер отбрасывает аудио с телефона и сохраняет в истории только метаданные звонка.
+
+Первый ответ содержит `id` и состояние звонка, обычно `ringing`. Повтор с теми же аргументами и ключом возвращает состояние того же звонка без перезвона в пределах 30-дневного хранения. Причина `playback_sent` означает, что сервер отправил все кадры в WebSocket Android. Если сервер перезапустился до завершения, повтор вернёт `interrupted`. При отказе Silero звонок не создаётся.
+
+Для подключения, созданного до добавления звонков, выберите **Перевыпустить доступ** в кабинете, обновите реквизиты в ChatGPT и подтвердите OAuth-право `calls:start`. Существующие права на уведомления и запросы действуют до перевыпуска.
+
 На домене Notify проверьте `/.well-known/oauth-protected-resource/chatgpt/mcp` и `/.well-known/oauth-authorization-server`. Запрос к `/chatgpt/mcp` без токена возвращает 401 с `WWW-Authenticate`. Для прежних клиентов используйте прежний `/mcp` с токеном интеграции.
 
-Соберите решение командой `dotnet build Notify.sln -c Release` и выполните `dotnet test Notify.sln --no-build -c Release`. Для smoke установите в отдельное окружение Python пакеты командой `python -m pip install "mcp==2.3.0" "httpx==0.28.1" "cryptography==50.0.2"`. `scripts/chatgpt_smoke.py --fixture-audio` использует изолированную SQLite, OIDC-стенд, программную подпись и тестовый WAV. Передайте вместо флага `http://127.0.0.1:<порт>`, чтобы использовать реальный Silero на изолированном тестовом порту.
+Соберите решение командой `dotnet build Notify.sln -c Release` и выполните `dotnet test Notify.sln --no-build -c Release`. Для smoke установите в отдельное окружение Python пакеты командой `python -m pip install "mcp==2.3.0" "httpx==0.28.1" "cryptography==50.0.2" "websockets>=14"`. `scripts/chatgpt_smoke.py --fixture-audio` использует изолированную SQLite, OIDC-стенд, программную подпись, тестовый WAV и WebSocket вместо телефона. Передайте вместо флага `http://127.0.0.1:<порт>`, чтобы использовать реальный Silero на изолированном тестовом порту.

@@ -15,6 +15,7 @@ from pathlib import Path
 import secrets
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 from threading import Thread
@@ -29,11 +30,12 @@ from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from websockets.asyncio.client import connect
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OWNER = "00000000-0000-4000-8000-000000000001"
-SCOPES = "notify:send requests:create requests:read requests:cancel offline_access"
+SCOPES = "notify:send requests:create requests:read requests:cancel calls:start offline_access"
 SSO_SECRET = secrets.token_urlsafe(32)
 
 
@@ -258,6 +260,7 @@ def code_flow(browser, adapter, resource, client_id, scopes=SCOPES, *, reuse_ses
         f"form-action 'self' {callback_origin.scheme}://{callback_origin.netloc}")
     descriptions = {
         "notify:send": "Отправлять вам текстовые и голосовые уведомления.",
+        "calls:start": "Звонить на ваш телефон и зачитывать текст после принятия звонка.",
         "requests:create": "Запрашивать у вас подтверждения и отправлять формы для заполнения.",
         "requests:read": "Читать статус и ваши ответы на запросы, созданные этим подключением.",
         "requests:cancel": "Отменять незавершённые запросы, созданные этим подключением.",
@@ -334,6 +337,22 @@ def call(*args, **kwargs):
     return asyncio.run(mcp_call(*args, **kwargs))
 
 
+async def hear_call(notify, call_id, device_token):
+    uri = notify.replace("http://", "ws://", 1) + f"/api/v1/calls/{call_id}/audio"
+    async with connect(uri, additional_headers={"Authorization": "Bearer " + device_token}) as socket:
+        assert json.loads(await asyncio.wait_for(socket.recv(), 5)) == {"type": "state", "status": "active"}
+        frames = 0
+        audible = False
+        # The real Android client can send mic frames after accepting. The playback peer discards them.
+        await socket.send(struct.pack(">III", 0, 0, 0) + bytes(640))
+        while isinstance(frame := await asyncio.wait_for(socket.recv(), 5), bytes):
+            assert len(frame) == 652 and struct.unpack(">III", frame[:12]) == (frames, frames * 20, 0)
+            audible |= any(frame[12:])
+            frames += 1
+        assert frames > 0 and audible
+        assert json.loads(frame) == {"type": "ended", "reason": "playback_sent"}
+
+
 def access_tokens(database):
     with sqlite3.connect(database) as db:
         return {row[0] for row in db.execute(
@@ -365,7 +384,7 @@ def smoke(directory, silero):
         assert discovery["code_challenge_methods_supported"] == ["S256"]
         challenge = client.get(resource)
         assert challenge.status_code == 401 and "resource_metadata=" in challenge.headers.get("www-authenticate", ""), challenge.status_code
-        assert "send_voice" not in call(notify, legacy_token, legacy=True)
+        assert {"send_voice", "start_call"}.isdisjoint(call(notify, legacy_token, legacy=True))
         assert phone.get("/api/v1/chatgpt").status_code == 403
         assert phone.post("/api/v1/management", json={"action": "chatgpt.link"}).status_code == 403
         sso.subject = "other-owner"
@@ -423,7 +442,11 @@ def smoke(directory, silero):
             "request_confirmation": "requests:create", "request_form": "requests:create",
             "get_request": "requests:read", "wait_for_response": "requests:read",
             "cancel_request": "requests:cancel",
+            "start_call": "calls:start",
         }
+        dial = {"title": "Тест звонка", "text": "Проверка звонка.", "idempotencyKey": secrets.token_hex(16)}
+        call(adapter, restricted, "start_call", dial, error="insufficient_scope")
+        call(notify, legacy_token, "start_call", dial, error="unknown_tool", legacy=True)
         message = {"title": "MCP test", "body": "Synthetic data", "idempotencyKey": secrets.token_hex(16)}
         call(adapter, restricted, "send_notification", message, error="insufficient_scope")
         assert call(adapter, token, "send_notification", message)["content"]["kind"] == "message"
@@ -477,12 +500,41 @@ def smoke(directory, silero):
         with wave.open(io.BytesIO(wav)) as sample:
             assert (sample.getnchannels(), sample.getsampwidth(), sample.getframerate()) == (1, 2, 16000)
             assert sample.getnframes() > 0 and any(sample.readframes(sample.getnframes()))
+        call(adapter, token, "start_call", dial, error="silero_unavailable")
+        assert phone.get("/api/v1/calls/incoming").status_code == 404
+        speech.offline = False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, retry = pool.map(lambda _: call(adapter, token, "start_call", dial), range(2))
+        call_id = first["id"]
+        assert first["status"] == retry["status"] == "ringing" and call_id == retry["id"]
+        assert phone.get("/api/v1/calls/incoming").raise_for_status().json()["id"] == call_id
+        assert phone.get(f"/api/v1/calls/{call_id}/audio").status_code == 404  # no media before acceptance
+        assert client.post(notify + f"/api/v1/calls/{call_id}/accept", headers=bearer, json={}).status_code == 401
+        call(adapter, token, "start_call", dial | {"text": "Другой текст."}, error="idempotency_conflict")
+        call(adapter, token, "start_call", dial | {"idempotencyKey": secrets.token_hex(16)}, error="busy")
+        phone.post(f"/api/v1/calls/{call_id}/accept", json={}).raise_for_status()
+        asyncio.run(hear_call(notify, call_id, device_token))
+        speech.offline = True
+        finished = call(adapter, token, "start_call", dial)
+        assert finished["id"] == call_id and finished["reason"] == "playback_sent"
+        assert phone.get("/api/v1/calls/incoming").status_code == 404
+        speech.offline = False
+        decline = dial | {"idempotencyKey": secrets.token_hex(16)}
+        declined_id = call(adapter, token, "start_call", decline)["id"]
+        phone.post(f"/api/v1/calls/{declined_id}/reject").raise_for_status()
+        assert call(adapter, token, "start_call", decline)["reason"] == "rejected"
         assert client.post(token_url, data=used_code, auth=auth).json()["error"] == "invalid_grant"
+        # Code replay can invalidate tokens issued from that authorization. Use a fresh
+        # authorization so this last check isolates the effect of disconnecting the link.
+        fields = code_flow(client, adapter, resource, auth[0])
+        token = client.post(token_url, data=fields, auth=auth).raise_for_status().json()["access_token"]
+        revoked_call = call(adapter, token, "start_call", dial | {"idempotencyKey": secrets.token_hex(16)})["id"]
         client.post(notify + "/api/v1/chatgpt/disconnect", json={}, headers=browser_headers).raise_for_status()
+        assert phone.get(f"/api/v1/calls/{revoked_call}").raise_for_status().json()["reason"] == "revoked"
         live_bearer = {"Authorization": "Bearer " + token}
         assert client.get(resource, headers=live_bearer).status_code in (401, 403)
         assert client.get(notify + "/api/v1/chatgpt").json()["clientId"] is None
-        print("PASS OAuth, MCP, scope/ownership, elevated software signature, refresh/revocation, WAV and lost-response retry")
+        print("PASS OAuth, MCP, scope/ownership, elevated software signature, refresh/revocation, WAV, idempotency and call playback")
 
 
 if __name__ == "__main__":

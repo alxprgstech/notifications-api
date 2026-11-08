@@ -460,6 +460,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             Exec(c, t, "DELETE FROM objects WHERE kind='call' AND CAST(json_extract(data,'$.startedAt') AS INTEGER)<$n", ("$n", cutoff));
             Exec(c, t, "DELETE FROM objects WHERE kind='delivery' AND json_extract(data,'$.notificationId') NOT IN (SELECT id FROM notifications)");
             Exec(c, t, "DELETE FROM objects WHERE kind='chatgpt_voice' AND CAST(json_extract(data,'$.createdAt') AS INTEGER)<$n", ("$n", cutoff - 86400000L));
+            Exec(c, t, "DELETE FROM objects WHERE kind=$k AND CAST(json_extract(data,'$.createdAt') AS INTEGER)<$n", ("$k", ChatGptCall.AttemptKind), ("$n", cutoff));
             Exec(c, t, "DELETE FROM changes WHERE at<$n", ("$n", cutoff)); return 0;
         });
         agents.Sweep();
@@ -574,7 +575,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
         switch (input.Action)
         {
             case ChatGptOAuth.LinkAction:
-                result = ChatGptOAuth.ApproveLink(c, t, Protect); break;
+                result = ChatGptOAuth.ApproveLink(c, t, Protect, out revokedSource); break;
             case "integration.create":
                 var sid = Wire.Id(); var secret = input.WebhookUrl == null ? null : Wire.Secret();
                 Put(c, t, "source", sid, new Source(sid, input.Name!, input.Scopes!, input.Preview ?? "hidden", input.IconId, input.WebhookUrl, secret == null ? null : Protect(secret)));
