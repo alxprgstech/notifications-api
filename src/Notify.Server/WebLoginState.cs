@@ -19,7 +19,7 @@ internal sealed class WebLoginState(
     public string Protect(AuthenticationProperties data, string? purpose)
     {
         var context = http.HttpContext ?? throw new InvalidOperationException("OIDC state requires an HTTP request.");
-        var state = Wire.Secret();
+        var state = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
         var properties = PropertiesSerializer.Default.Serialize(data);
         var value = Protector(state, purpose).Protect(properties, lifetime);
         var options = CookieSettings();

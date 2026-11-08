@@ -31,3 +31,5 @@ http://{$NOTIFY_DOMAIN:notify.alxprgs.tech}:8080 {
         flush_interval -1
     }
 }
+
+import /etc/caddy/notify-chatgpt/*.caddy
