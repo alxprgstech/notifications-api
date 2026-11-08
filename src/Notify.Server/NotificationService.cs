@@ -459,6 +459,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             Exec(c, t, "DELETE FROM objects WHERE kind='callchallenge' AND CAST(json_extract(data,'$.expiresAt') AS INTEGER)<$n", ("$n", Wire.Now - 3600000));
             Exec(c, t, "DELETE FROM objects WHERE kind='call' AND CAST(json_extract(data,'$.startedAt') AS INTEGER)<$n", ("$n", cutoff));
             Exec(c, t, "DELETE FROM objects WHERE kind='delivery' AND json_extract(data,'$.notificationId') NOT IN (SELECT id FROM notifications)");
+            Exec(c, t, "DELETE FROM objects WHERE kind='chatgpt_voice' AND CAST(json_extract(data,'$.createdAt') AS INTEGER)<$n", ("$n", cutoff - 86400000L));
             Exec(c, t, "DELETE FROM changes WHERE at<$n", ("$n", cutoff)); return 0;
         });
         agents.Sweep();
@@ -504,12 +505,17 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
     public Management BeginManagement(Actor actor, ManagementInput input)
     {
         actor.RequireOwner();
-        if (input.Action is not ("integration.create" or "integration.revoke" or "device.revoke" or "source.update" or "agent.register") || input.Name?.Length > 80 || input.Name?.Any(char.IsControl) == true || input.TargetId?.Length > 64 || input.IconId?.Length > 64 || input.Preview is not (null or "hidden" or "full") ||
+        if (input.Action is not ("integration.create" or "integration.revoke" or "device.revoke" or "source.update" or "agent.register" or ChatGptOAuth.LinkAction) || input.Name?.Length > 80 || input.Name?.Any(char.IsControl) == true || input.TargetId?.Length > 64 || input.IconId?.Length > 64 || input.Preview is not (null or "hidden" or "full") ||
             input.Scopes?.Any(s => s is not ("notify:send" or "requests:create" or "requests:read" or "requests:cancel" or "icons:write" or "agents:connect")) == true ||
             input.Capabilities?.Length > 3 || input.Capabilities?.Any(c => c is not ("text_tasks" or "voice_messages" or "realtime_audio")) == true || input.Capabilities?.Distinct(StringComparer.Ordinal).Count() != input.Capabilities?.Length) throw new Fault(400, "invalid_management_action");
         if (input.Action == "integration.create" && (string.IsNullOrWhiteSpace(input.Name) || input.Scopes is not { Length: > 0 })) throw new Fault(400, "invalid_integration");
         if (input.Action == "agent.register" && (string.IsNullOrWhiteSpace(input.Name) || input.Capabilities is not { Length: > 0 } || input.Scopes != null || input.Preview != null || input.WebhookUrl != null || input.IconId != null)) throw new Fault(400, "invalid_agent");
-        if (input.Action != "integration.create" && input.TargetId == null) throw new Fault(400, "target_required");
+        if (input.Action == ChatGptOAuth.LinkAction)
+        {
+            if (actor.Kind != "web") throw new Fault(403, "web_required");
+            if (input != new ManagementInput(ChatGptOAuth.LinkAction)) throw new Fault(400, "invalid_management_action");
+        }
+        else if (input.Action != "integration.create" && input.TargetId == null) throw new Fault(400, "target_required");
         return db.Run((c, t) =>
         {
             if (!All<Device>(c, t, "device").Any(d => !d.Revoked)) throw new Fault(409, "trusted_device_required");
@@ -526,6 +532,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             var m = new Management(Wire.Id(), actor.SessionId ?? actor.Id, input, Wire.Now + 300000); Put(c, t, "management", m.Id, m);
             var description = input.Action switch
             {
+                ChatGptOAuth.LinkAction => "Выдать ChatGPT доступ к выделенному источнику Notify. ChatGPT сможет отправлять сообщения и запрашивать, читать и отменять свои подтверждения и формы. Прежнее подключение ChatGPT будет отозвано.",
                 "integration.create" => "Создать доступ для «" + input.Name + "». Права: " + string.Join(", ", input.Scopes!.Select(s => s switch { "notify:send" => "сообщения", "requests:create" => "запросы подтверждения", "requests:read" => "чтение своих результатов", "requests:cancel" => "отмена своих запросов", "agents:connect" => "подключение агента", _ => "загрузка иконок" })) + (input.WebhookUrl == null ? "" : ". Доставлять ответы на " + input.WebhookUrl),
                 "integration.revoke" => "Отозвать доступ интеграции «" + (Get<Source>(c, t, "source", input.TargetId!)?.Name ?? "Неизвестный источник") + "».",
                 "device.revoke" => "Отозвать устройство «" + (Get<Device>(c, t, "device", input.TargetId!)?.Name ?? "Неизвестное устройство") + "».",
@@ -554,6 +561,8 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
         object result = new { ok = true }; var input = m.Input; string? revokedSource = null, revokedDevice = null;
         switch (input.Action)
         {
+            case ChatGptOAuth.LinkAction:
+                result = ChatGptOAuth.ApproveLink(c, t, Protect); break;
             case "integration.create":
                 var sid = Wire.Id(); var secret = input.WebhookUrl == null ? null : Wire.Secret();
                 Put(c, t, "source", sid, new Source(sid, input.Name!, input.Scopes!, input.Preview ?? "hidden", input.IconId, input.WebhookUrl, secret == null ? null : Protect(secret)));

@@ -1,10 +1,11 @@
-"""Exercise the real OAuth adapter and Notify with an isolated OIDC provider and SQLite."""
+"""Exercise the integrated Notify OAuth endpoint with an isolated OIDC provider and SQLite."""
 import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -23,15 +24,16 @@ import wave
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.keywrap import aes_key_unwrap
 import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OWNER = "synthetic-owner"
+OWNER = "00000000-0000-4000-8000-000000000001"
 SCOPES = "notify:send requests:create requests:read requests:cancel offline_access"
-CLIENT_SECRET = secrets.token_urlsafe(32)
 SSO_SECRET = secrets.token_urlsafe(32)
 
 
@@ -41,6 +43,33 @@ def b64(value):
 
 def digest(value):
     return b64(hashlib.sha256(value.encode()).digest())
+
+
+def decode64(value):
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def wrong_audience_token(token, oauth_directory, audience):
+    """Re-sign and encrypt a fixture token, changing only its audience."""
+    header, wrapped, iv, ciphertext, _ = token.split(".")
+    assert json.loads(decode64(header))["enc"] == "A256CBC-HS512"
+    key = aes_key_unwrap((oauth_directory / "encryption.key").read_bytes(), decode64(wrapped))
+    decryptor = Cipher(algorithms.AES(key[32:]), modes.CBC(decode64(iv))).decryptor()
+    plain = decryptor.update(decode64(ciphertext)) + decryptor.finalize()
+    signing_header, claims, _ = plain[:-plain[-1]].decode().split(".")
+    claims = json.loads(decode64(claims))
+    assert claims["aud"] == audience or claims["aud"] == [audience]
+    signing_info = json.loads(decode64(signing_header))
+    signing_key = serialization.load_pem_private_key((oauth_directory / "signing.pem").read_bytes(), password=None)
+    claims["aud"] = audience + "/wrong"
+    signed = jwt(signing_key, claims, kind=signing_info["typ"], kid=signing_info["kid"]).encode()
+    padding_size = 16 - len(signed) % 16
+    iv = secrets.token_bytes(16)
+    encryptor = Cipher(algorithms.AES(key[32:]), modes.CBC(iv)).encryptor()
+    encrypted = encryptor.update(signed + bytes([padding_size]) * padding_size) + encryptor.finalize()
+    aad = header.encode()
+    tag = hmac.digest(key[:32], aad + iv + encrypted + (len(aad) * 8).to_bytes(8, "big"), "sha512")[:32]
+    return ".".join([header, wrapped, b64(iv), b64(encrypted), b64(tag)])
 
 
 def jwt(key, claims, kind="JWT", kid="sso-test"):
@@ -212,27 +241,25 @@ class Consent(HTMLParser):
             self.fields[attrs["name"]] = attrs["value"]
 
 
-def code_flow(browser, adapter, resource, scopes=SCOPES, *, unauthorized=False):
+def code_flow(browser, adapter, resource, client_id, scopes=SCOPES, *, reuse_session=True):
     verifier = secrets.token_urlsafe(48)
     state = secrets.token_urlsafe(24)
     callback = adapter + "/test-client/callback"
-    consent = browser.get(adapter + "/oauth/authorize", params={
-        "client_id": "chatgpt-test", "redirect_uri": callback, "response_type": "code",
+    consent = browser.get(adapter + "/chatgpt/oauth/authorize", params={
+        "client_id": client_id, "redirect_uri": callback, "response_type": "code",
         "code_challenge": digest(verifier), "code_challenge_method": "S256",
         "resource": resource, "scope": scopes, "state": state,
     }, follow_redirects=True)
-    if unauthorized:
-        assert consent.status_code == 401, (
-            [(r.status_code, r.url.path) for r in [*consent.history, consent]],
-            consent.text[:400],
-        )
-        return None
     consent.raise_for_status()
+    if reuse_session:
+        assert not consent.history
+    else:
+        assert "/signin-oidc" in {response.url.path for response in consent.history}
     fields = Consent(consent.text).fields
     assert fields["resource"] == resource
     csrf = fields.pop("__RequestVerificationToken")
-    assert browser.post(adapter + "/oauth/authorize", data=fields | {"decision": "allow"}).status_code == 400
-    result = browser.post(adapter + "/oauth/authorize", data=fields | {"decision": "allow", "__RequestVerificationToken": csrf})
+    assert browser.post(adapter + "/chatgpt/oauth/authorize", data=fields | {"decision": "allow"}).status_code == 400
+    result = browser.post(adapter + "/chatgpt/oauth/authorize", data=fields | {"decision": "allow", "__RequestVerificationToken": csrf})
     assert result.is_redirect, (result.status_code, result.text)
     returned = parse_qs(urlsplit(result.headers["location"]).query)
     assert returned.get("state") == [state] and "code" in returned, returned.keys()
@@ -266,15 +293,18 @@ def seed(directory):
     return data, credentials[0][0], credentials[0][2], credentials[1][0], device_token, device_key
 
 
-async def mcp_call(adapter, token, name=None, args=None, *, error=None):
+async def mcp_call(adapter, token, name=None, args=None, *, error=None, legacy=False):
     async with httpx.AsyncClient(headers={"Authorization": "Bearer " + token}, timeout=45, trust_env=False) as client:
-        async with streamable_http_client(adapter + "/mcp", http_client=client) as streams:
+        async with streamable_http_client(adapter + ("/mcp" if legacy else "/chatgpt/mcp"), http_client=client) as streams:
             async with ClientSession(*streams[:2]) as session:
                 await session.initialize()
                 if name is None:
+                    tools = (await session.list_tools()).tools
+                    if legacy:
+                        return {tool.name for tool in tools}
                     return {
                         tool.name: tool.model_dump(by_alias=True)["_meta"]["securitySchemes"][0]["scopes"][0]
-                        for tool in (await session.list_tools()).tools
+                        for tool in tools
                     }
                 result = (await session.call_tool(name, args)).model_dump(by_alias=True)
                 if error:
@@ -299,46 +329,73 @@ def access_tokens(database):
 
 
 def smoke(directory, silero):
-    notify, adapter = origin(), origin()
-    data, notify_token, source_id, other_token, device_token, device_key = seed(directory)
-    adapter_data = directory / "adapter"
+    notify = adapter = origin()
+    data, legacy_token, _, other_token, device_token, device_key = seed(directory)
     with ExitStack() as stack:
         sso = stack.enter_context(fixture(Sso))
         sso.key, sso.codes, sso.subject = rsa.generate_private_key(public_exponent=65537, key_size=2048), {}, OWNER
-        proxy = stack.enter_context(fixture(FaultProxy))
-        proxy.upstream, proxy.drop_key, proxy.offline = notify, None, False
         speech = stack.enter_context(fixture(FaultProxy))
         speech.upstream, speech.drop_key, speech.offline = silero, None, False
-        stack.enter_context(start("Notify.Server", notify, {"Notify__PublicUrl": notify, "Notify__DataPath": str(data)}, directory))
-        settings = {"PublicUrl": adapter, "SsoIssuer": sso.url, "SsoClientId": "notify-mcp-test",
-                    "SsoClientSecret": SSO_SECRET, "OwnerSub": OWNER, "ClientId": "chatgpt-test",
-                    "ClientSecret": CLIENT_SECRET, "ClientRedirect": adapter + "/test-client/callback",
-                    "NotifyUrl": proxy.url, "NotifyToken": notify_token, "NotifySourceId": source_id,
-                    "SileroUrl": speech.url, "DataPath": str(adapter_data)}
-        stack.enter_context(start("Notify.ChatGpt", adapter, {"ChatGpt__" + k: v for k, v in settings.items()}, directory))
+        settings = {"Notify__PublicUrl": notify, "Notify__SsoIssuer": sso.url, "Notify__WebClientId": "notify-mcp-test",
+                    "Notify__WebClientSecret": SSO_SECRET, "Notify__OwnerSub": OWNER, "Notify__DataPath": str(data),
+                    "ChatGpt__SileroUrl": speech.url}
+        with sqlite3.connect(data / "notify.db") as db:
+            db.execute("INSERT INTO objects VALUES(?,?,?)", ("meta", "owner", json.dumps(OWNER)))
+        stack.enter_context(start("Notify.Server", notify, settings, directory))
         client = stack.enter_context(httpx.Client(timeout=15, trust_env=False))
         phone = stack.enter_context(httpx.Client(base_url=notify, headers={"Authorization": "Bearer " + device_token}))
-        resource = adapter + "/mcp"
-        metadata = client.get(adapter + "/.well-known/oauth-protected-resource/mcp").json()
-        discovery = client.get(adapter + "/.well-known/oauth-authorization-server").json()
+        resource = notify + "/chatgpt/mcp"
+        metadata = client.get(notify + "/.well-known/oauth-protected-resource/chatgpt/mcp").json()
+        discovery = client.get(notify + "/.well-known/oauth-authorization-server").json()
         assert metadata["resource"] == resource and metadata["authorization_servers"] == [discovery["issuer"]]
         assert discovery["code_challenge_methods_supported"] == ["S256"]
         challenge = client.get(resource)
-        assert challenge.status_code == 401 and "resource_metadata=" in challenge.headers.get("www-authenticate", ""), (
-            challenge.status_code, challenge.headers.get("www-authenticate"), challenge.text)
+        assert challenge.status_code == 401 and "resource_metadata=" in challenge.headers.get("www-authenticate", ""), challenge.status_code
+        assert "send_voice" not in call(notify, legacy_token, legacy=True)
+        assert phone.get("/api/v1/chatgpt").status_code == 403
+        assert phone.post("/api/v1/management", json={"action": "chatgpt.link"}).status_code == 403
         sso.subject = "other-owner"
-        code_flow(client, adapter, resource, unauthorized=True)
+        assert client.get(notify + "/auth/login", follow_redirects=True).status_code == 401
         sso.subject = OWNER
-        fields = code_flow(client, adapter, resource)
-        auth = ("chatgpt-test", CLIENT_SECRET)
+        login = client.get(notify + "/auth/login", follow_redirects=True)
+        assert login.url.path == "/" and "/signin-oidc" in {response.url.path for response in login.history}
+        session = client.get(notify + "/api/v1/session").raise_for_status().json()
+        browser_headers = {"Origin": notify, "X-CSRF-Token": session["csrfToken"]}
+        management = client.post(notify + "/api/v1/management", json={"action": "chatgpt.link"},
+                                 headers=browser_headers).raise_for_status().json()
+        history = phone.get("/api/v1/notifications").raise_for_status().json()["items"]
+        link_notice = next(item["id"] for item in history if item.get("managementId") == management["id"])
+        answer = {"decision": "yes"}
+        endpoint = f"/api/v1/notifications/{link_notice}"
+        assert phone.post(endpoint + "/response", json={"answer": answer}).status_code == 403
+        proof = phone.post(endpoint + "/challenge", json=answer).raise_for_status().json()
+        signature = device_key.sign(base64.b64decode(proof["payload"]), ec.ECDSA(hashes.SHA256()))
+        phone.post(endpoint + "/response", json={"answer": answer, "challengeId": proof["id"],
+                                                  "signature": base64.b64encode(signature).decode()}).raise_for_status()
+        management_path = notify + "/api/v1/management/" + management["id"]
+        connection = client.get(management_path).raise_for_status().json()["result"]
+        assert "result" not in client.get(management_path).raise_for_status().json()
+        callback = notify + "/test-client/callback"
+        assert client.post(notify + "/api/v1/chatgpt/callback", json={"redirectUri": callback},
+                           headers={"Origin": notify}).status_code == 403
+        assert client.post(notify + "/api/v1/chatgpt/callback", json={"redirectUri": "https://invalid.example/callback"},
+                           headers=browser_headers).status_code == 400
+        client.post(notify + "/api/v1/chatgpt/callback", json={"redirectUri": callback},
+                    headers=browser_headers).raise_for_status()
+        assert client.get(notify + "/api/v1/chatgpt").json()["redirectUri"] == callback
+        auth = (connection["clientId"], connection["clientSecret"])
+        with httpx.Client(timeout=15, trust_env=False) as fresh:
+            fields = code_flow(fresh, adapter, resource, auth[0], reuse_session=False)
         token_url = discovery["token_endpoint"]
         assert client.post(token_url, data=fields | {"resource": adapter + "/other"}, auth=auth).json()["error"] == "invalid_target"
         result = client.post(token_url, data=fields, auth=auth)
         assert result.is_success, (result.status_code, result.text)
         token, refresh = (result.json()[key] for key in ("access_token", "refresh_token"))
+        wrong_aud = wrong_audience_token(token, data / "chatgpt", resource)
+        assert client.get(resource, headers={"Authorization": "Bearer " + wrong_aud}).status_code == 401
         used_code = fields
-        fields = code_flow(client, adapter, resource, "requests:read")
-        oauth_db = adapter_data / "adapter.db"
+        fields = code_flow(client, adapter, resource, auth[0], "requests:read")
+        oauth_db = data / "chatgpt" / "oauth.db"
         before = access_tokens(oauth_db)
         restricted = client.post(token_url, data=fields, auth=auth).json()["access_token"]
         restricted_id, = access_tokens(oauth_db) - before
@@ -360,6 +417,10 @@ def smoke(directory, silero):
         assert client.get(resource, headers={"Authorization": "Bearer " + restricted}).status_code in (401, 403)
         answer = {"decision": "yes"}
         endpoint = f"/api/v1/notifications/{identifier}"
+        bearer = {"Authorization": "Bearer " + token}
+        assert client.get(notify + "/api/v1/session", headers=bearer).status_code == 401
+        assert client.post(notify + "/mcp", headers=bearer, json={}).status_code == 401
+        assert client.post(notify + endpoint + "/response", headers=bearer, json={"answer": answer}).status_code == 401
         assert phone.post(endpoint + "/response", json={"answer": answer}).status_code == 403
         proof = phone.post(endpoint + "/challenge", json=answer).raise_for_status().json()
         signature = device_key.sign(base64.b64decode(proof["payload"]), ec.ECDSA(hashes.SHA256()))
@@ -382,8 +443,9 @@ def smoke(directory, silero):
         call(adapter, token, "send_voice", audio, error="silero_unavailable")
         assert call(adapter, token, "send_notification", message | {"idempotencyKey": secrets.token_hex(16)})["content"]["kind"] == "message"
         speech.offline = False
-        proxy.drop_key = audio["idempotencyKey"]
-        call(adapter, token, "send_voice", audio, error="notify_unavailable")
+        # Drop the first client result, then retry with Silero offline to prove upload reuse.
+        call(adapter, token, "send_voice", audio)
+        speech.offline = True
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: call(adapter, token, "send_voice", audio), range(2)))
         assert results[0]["id"] == results[1]["id"]
@@ -397,6 +459,10 @@ def smoke(directory, silero):
             assert (sample.getnchannels(), sample.getsampwidth(), sample.getframerate()) == (1, 2, 16000)
             assert sample.getnframes() > 0 and any(sample.readframes(sample.getnframes()))
         assert client.post(token_url, data=used_code, auth=auth).json()["error"] == "invalid_grant"
+        client.post(notify + "/api/v1/chatgpt/disconnect", json={}, headers=browser_headers).raise_for_status()
+        live_bearer = {"Authorization": "Bearer " + token}
+        assert client.get(resource, headers=live_bearer).status_code in (401, 403)
+        assert client.get(notify + "/api/v1/chatgpt").json()["clientId"] is None
         print("PASS OAuth, MCP, scope/ownership, elevated software signature, refresh/revocation, WAV and lost-response retry")
 
 

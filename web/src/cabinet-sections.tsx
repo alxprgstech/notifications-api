@@ -23,6 +23,7 @@ export type Call = {
   startedAt: number; status: string; reason?: string; durationMs: number; direction?: string;
 };
 export type ManagementInput =
+  | { action: 'chatgpt.link' }
   | { action: 'integration.create'; name: string; scopes: string[]; webhookUrl: string | null }
   | { action: 'source.update'; targetId: string; preview: 'full' | 'hidden' }
   | { action: 'integration.revoke' | 'device.revoke'; targetId: string }

@@ -8,9 +8,11 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using Microsoft.OpenApi;
 using Notify;
@@ -46,7 +48,7 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.ConfigureHttpJsonOptions(o => { o.SerializerOptions.UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow; o.SerializerOptions.RespectNullableAnnotations = true; o.SerializerOptions.RespectRequiredConstructorParameters = true; });
 builder.WebHost.ConfigureKestrel(o => { o.Limits.MaxRequestBodySize = 11 * 1024 * 1024; o.Limits.MaxConcurrentConnections = 128; });
 builder.Services.AddOpenApi(OpenApiDocs.Configure);
-builder.Services.AddMcpServer().WithHttpTransport().WithTools<NotifyTools>();
+ChatGptOAuth.WithMcpFilters(builder.Services.AddMcpServer().WithHttpTransport().WithTools<NotifyTools>(), settings);
 var secureCookies = new Uri(settings.PublicUrl).Scheme == "https";
 builder.Services.AddOptions<ForwardedHeadersOptions>().Configure<Settings>((o, config) =>
 {
@@ -86,6 +88,7 @@ builder.Services.AddOptions<CookieAuthenticationOptions>("web").Configure<IDataP
 builder.Services.AddOptions<OpenIdConnectOptions>("sso").Configure<IHttpContextAccessor, IDataProtectionProvider>((o, http, protection) =>
     o.StateDataFormat = new WebLoginState(http, protection, o.CallbackPath, o.RemoteAuthenticationTimeout, secureCookies));
 builder.Services.AddAuthorization();
+ChatGptOAuth.Register(builder, settings);
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = 429;
@@ -96,12 +99,16 @@ settings = app.Services.GetRequiredService<Settings>(); settings.Validate(app.En
 _ = app.Services.GetRequiredService<Database>();
 _ = app.Services.GetRequiredService<CallService>();
 if (args.Length == 2 && args[0] == "backup") { app.Services.GetRequiredService<Database>().Backup(args[1]); return; }
+_ = app.Services.GetRequiredService<ChatGptKeys>();
+await using (var scope = app.Services.CreateAsyncScope())
+    await scope.ServiceProvider.GetRequiredService<ChatGptDb>().Database.EnsureCreatedAsync();
 if (!string.IsNullOrEmpty(settings.TrustedProxyNetwork)) app.UseForwardedHeaders();
 app.Use(async (context, next) =>
 {
     context.Response.Headers.XContentTypeOptions = "nosniff"; context.Response.Headers["Referrer-Policy"] = "no-referrer";
     context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
     if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/auth") || context.Request.Path.StartsWithSegments("/android")) context.Response.Headers.CacheControl = "no-store";
+    ChatGptOAuth.ProtectResponse(context, settings);
     try { await next(); }
     catch (Fault e) when (!context.Response.HasStarted) { context.Response.StatusCode = e.Status; await context.Response.WriteAsJsonAsync(new { code = e.Code }); }
     catch (BadHttpRequestException) when (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { code = "invalid_request" }); }
@@ -243,11 +250,13 @@ api.MapGet("/icons/{id}", (string id, HttpContext c, Database db) =>
     return Results.File(Path.GetFullPath(Path.Combine(settings.DataPath, "icons", icon.FileName)), icon.ContentType);
 });
 app.MapMcp("/mcp").RequireAuthorization();
+ChatGptOAuth.Map(app, api, settings);
 app.MapOpenApi("/openapi/{documentName}.json");
 app.UseDefaultFiles(); app.UseStaticFiles();
 app.MapFallback(async c =>
 {
-    if (c.Request.Path.StartsWithSegments("/api") || c.Request.Path.StartsWithSegments("/auth") || c.Request.Path.StartsWithSegments("/mcp")) { c.Response.StatusCode = 404; return; }
+    if (c.Request.Path.StartsWithSegments("/api") || c.Request.Path.StartsWithSegments("/auth") ||
+        c.Request.Path.StartsWithSegments("/mcp") || c.Request.Path.StartsWithSegments("/chatgpt")) { c.Response.StatusCode = 404; return; }
     var index = Path.Combine(app.Environment.WebRootPath ?? Path.Combine(app.Environment.ContentRootPath, "wwwroot"), "index.html");
     if (File.Exists(index)) { c.Response.ContentType = "text/html; charset=utf-8"; await c.Response.SendFileAsync(index); }
     else { c.Response.StatusCode = 503; await c.Response.WriteAsJsonAsync(new { code = "web_build_required" }); }
@@ -288,26 +297,55 @@ public sealed class LocalAuthentication(IOptionsMonitor<AuthenticationSchemeOpti
     }
 }
 [McpServerToolType]
-public sealed class NotifyTools(NotificationService service, IHttpContextAccessor context)
+public sealed class NotifyTools(NotificationService service, IHttpContextAccessor context, ChatGptVoice voice)
 {
-    private Actor Actor => Auth.Actor(context.HttpContext ?? throw new Fault(401, "integration_required"));
+    private bool IsChatGpt => context.HttpContext?.Request.Path == ChatGptOAuth.McpPath;
+
+    private Actor Actor
+    {
+        get
+        {
+            var http = context.HttpContext ?? throw new Fault(401, "integration_required");
+            return http.Request.Path == ChatGptOAuth.McpPath
+                ? http.RequestServices.GetRequiredService<ChatGptOAuth>().GetActor(http.User) ?? throw new Fault(401, "unauthenticated")
+                : Auth.Actor(http);
+        }
+    }
+    [McpServerTool, System.ComponentModel.Description("Send a Russian voice notification using local Silero. Reuse the idempotency key on retry.")]
+    public Task<string> SendVoice(string title, string text, DateTimeOffset expiresAt, string idempotencyKey, CancellationToken cancellationToken) =>
+        context.HttpContext?.Request.Path == ChatGptOAuth.McpPath
+            ? voice.Send(Actor, title, text, expiresAt, idempotencyKey, cancellationToken)
+            : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Send an informational notification. Requires an idempotency key. Does not request approval.")]
-    public string SendNotification(string title, string body, string idempotencyKey, string? iconId = null, string? correlationId = null) => Wire.Encode(service.Create(Actor, new CreateNotification("message", title, body, IconId: iconId, CorrelationId: correlationId), idempotencyKey));
+    public string SendNotification(string title, string body, string idempotencyKey, string? iconId = null, string? correlationId = null) =>
+        Run(() => service.Create(Actor, new CreateNotification("message", title, body, IconId: iconId, CorrelationId: correlationId), idempotencyKey));
     [McpServerTool, System.ComponentModel.Description("Request yes/no/custom approval. Never treat pending/expired/cancelled as approval. Elevated requires Android verification.")]
-    public string RequestConfirmation(string title, string body, DateTimeOffset expiresAt, string idempotencyKey, string securityLevel = "standard", bool allowCustom = true, string? iconId = null, string? correlationId = null) => Wire.Encode(service.Create(Actor, new CreateNotification("confirmation", title, body, securityLevel, expiresAt, allowCustom, iconId, correlationId), idempotencyKey));
+    public string RequestConfirmation(string title, string body, DateTimeOffset expiresAt, string idempotencyKey, string securityLevel = "standard", bool allowCustom = true, string? iconId = null, string? correlationId = null) =>
+        Run(() => service.Create(Actor, new CreateNotification("confirmation", title, body, securityLevel, expiresAt, allowCustom, iconId, correlationId), idempotencyKey));
     [McpServerTool, System.ComponentModel.Description("Request a structured form (1-20 fields: text, boolean, single_choice, multi_choice, number). fieldsJson must be a JSON array of field objects. Elevated forms require Android verification.")]
     public string RequestForm(string title, string body, DateTimeOffset expiresAt, string idempotencyKey, string fieldsJson, string securityLevel = "standard", string? iconId = null, string? correlationId = null)
     {
         List<FormField> fields;
-        try { fields = Wire.Decode<List<FormField>>(fieldsJson); } catch (JsonException) { throw new Fault(400, "invalid_form"); }
-        return Wire.Encode(service.Create(Actor, new CreateNotification("form", title, body, securityLevel, expiresAt, false, iconId, correlationId, new FormSpec(fields)), idempotencyKey));
+        try { fields = Wire.Decode<List<FormField>>(fieldsJson); }
+        catch (JsonException) { throw IsChatGpt ? new McpException("invalid_form") : new Fault(400, "invalid_form"); }
+        return Run(() => service.Create(Actor, new CreateNotification("form", title, body, securityLevel, expiresAt, false, iconId, correlationId, new FormSpec(fields)), idempotencyKey));
     }
-    [McpServerTool] public string GetRequest(string id) => Wire.Encode(service.Read(Actor, id));
-    [McpServerTool] public string CancelRequest(string id) => Wire.Encode(service.Cancel(Actor, id));
+    [McpServerTool] public string GetRequest(string id) => Run(() => service.Read(Actor, id));
+    [McpServerTool] public string CancelRequest(string id) => Run(() => service.Cancel(Actor, id));
     [McpServerTool]
     public async Task<string> WaitForResponse(string id, int seconds = 20, CancellationToken cancellationToken = default)
     {
-        var actor = Actor; actor.RequireScope("requests:read"); if (seconds is < 0 or > 25) throw new Fault(400, "invalid_wait_seconds"); var end = Wire.Now + seconds * 1000; Notification n;
-        while ((n = service.Read(actor, id)).Status == "pending" && Wire.Now < end) await Task.Delay(500, cancellationToken); return Wire.Encode(n);
+        try
+        {
+            var actor = Actor; actor.RequireScope("requests:read"); if (seconds is < 0 or > 25) throw new Fault(400, "invalid_wait_seconds"); var end = Wire.Now + seconds * 1000; Notification n;
+            while ((n = service.Read(actor, id)).Status == "pending" && Wire.Now < end) await Task.Delay(500, cancellationToken); return Wire.Encode(n);
+        }
+        catch (Fault error) when (IsChatGpt) { throw new McpException(error.Code); }
+    }
+
+    private string Run(Func<Notification> operation)
+    {
+        try { return Wire.Encode(operation()); }
+        catch (Fault error) when (IsChatGpt) { throw new McpException(error.Code); }
     }
 }

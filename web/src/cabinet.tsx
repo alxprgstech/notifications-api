@@ -11,7 +11,9 @@ type Session = { csrfToken: string };
 type Detail = { preview: Notification; full?: Notification; error: string };
 type Secret = { token: string; webhookSecret?: string; sourceId?: string };
 type Outcome = { tone: 'success' | 'warning' | 'danger'; title: string; text?: string };
-type Approval = { id: string; deadline: number; createsToken: boolean };
+type Approval = { id: string; deadline: number; action: ManagementInput['action'] };
+type ChatGptCredentials = { clientId: string; clientSecret: string };
+type ChatGptStatus = { url: string; clientId: string | null; redirectUri: string | null };
 type Resources = {
   history: HistoryPage; sources: Source[]; devices: Device[]; agents: Agent[]; calls: Call[];
 };
@@ -24,6 +26,8 @@ const errors: Record<string, string> = {
   invalid_origin: 'Откройте Notify по основному адресу и повторите действие.',
   agent_already_registered: 'Для этого источника уже зарегистрирован агент.',
   agent_registration_pending: 'Запрос на регистрацию этого агента уже ожидает подтверждения.',
+  invalid_chatgpt_callback: 'Введите точный HTTPS callback из настроек подключения ChatGPT.',
+  chatgpt_link_changed: 'Подключение изменилось. Обновите кабинет и повторите действие.',
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -117,6 +121,8 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
   const [approval, setApproval] = useState<Approval | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [secret, setSecret] = useState<Secret | null>(null);
+  const [chatgptSecret, setChatgptSecret] = useState<ChatGptCredentials | null>(null);
+  const [chatgptRevision, setChatgptRevision] = useState(0);
   const [signingOut, setSigningOut] = useState(false);
   const mutation = useRef(false);
   const mounted = useRef(true);
@@ -187,7 +193,7 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
 
   useEffect(() => {
     if (!approval) return;
-    const { id, deadline, createsToken } = approval;
+    const { id, deadline, action } = approval;
     let live = true;
     let timer: number;
     function finish(result: Outcome) {
@@ -197,11 +203,15 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
     }
     async function poll() {
       try {
-        const state = await api<{ status: string; result?: Partial<Secret> }>('/management/' + encodeURIComponent(id));
+        const state = await api<{ status: string; result?: Partial<Secret & ChatGptCredentials> }>('/management/' + encodeURIComponent(id));
         if (!live) return;
         if (state.status === 'approved') {
           if (state.result?.token) setSecret({ ...state.result, token: state.result.token });
-          if (createsToken && !state.result?.token) {
+          if (state.result?.clientId && state.result.clientSecret)
+            setChatgptSecret({ clientId: state.result.clientId, clientSecret: state.result.clientSecret });
+          if (action === 'chatgpt.link') setChatgptRevision(value => value + 1);
+          if ((action === 'integration.create' && !state.result?.token) ||
+              (action === 'chatgpt.link' && !state.result?.clientSecret)) {
             finish({ tone: 'warning', title: 'Доступ создан, одноразовые данные недоступны' });
           } else {
             finish({ tone: 'success', title: 'Действие подтверждено' });
@@ -252,14 +262,14 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== 'k') return;
-      if (form || detail || secret || quick) return;
+      if (form || detail || secret || chatgptSecret || quick) return;
       event.preventDefault();
       const focus = menu ? menuTrigger.current : document.activeElement;
       openQuick(focus instanceof HTMLElement && focus !== document.body ? focus : null);
     }
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
-  }, [form, detail, secret, quick, menu, openQuick]);
+  }, [form, detail, secret, chatgptSecret, quick, menu, openQuick]);
 
   function navigate(section: Section) {
     if (tab !== section) window.scrollTo({ top: 0 });
@@ -280,14 +290,14 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
   }
 
   async function manage(input: ManagementInput) {
-    if (mutation.current || signingOut || secret) return;
+    if (mutation.current || signingOut || secret || chatgptSecret) return;
     mutation.current = true;
     setForm(null);
     setSubmitting(true);
     setOutcome(null);
     try {
       const result = await api<{ id: string }>('/management', input);
-      if (mounted.current) setApproval({ id: result.id, deadline: Date.now() + 300_000, createsToken: input.action === 'integration.create' });
+      if (mounted.current) setApproval({ id: result.id, deadline: Date.now() + 300_000, action: input.action });
     } catch (error) {
       mutation.current = false;
       if (mounted.current) setOutcome({ tone: 'danger', title: errorText(error) });
@@ -312,7 +322,7 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
 
   const current = sections.find(section => section.id === tab)!;
   const failure = failures[tab] || (tab === 'sources' ? failures.agents : undefined);
-  const busy = submitting || !!approval || !!secret || signingOut;
+  const busy = submitting || !!approval || !!secret || !!chatgptSecret || signingOut;
   const { history, sources, agents, devices, calls } = resources;
   const navigation = <nav aria-label="Основная навигация" className="section-nav">
     {sections.map(section => <button key={section.id} type="button"
@@ -369,6 +379,9 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
           failed={!!failure} integrations={() => navigate('sources')} />}
         {tab === 'sources' && <Integrations sources={sources} agents={agents} busy={busy}
           open={setForm} manage={input => void manage(input)} blocked={loading || !!failure} />}
+        {tab === 'sources' && <ChatGptPanel api={api} revision={chatgptRevision} busy={busy}
+          connect={() => void manage({ action: 'chatgpt.link' })}
+          changed={() => { setChatgptRevision(value => value + 1); void load(undefined, true); }} />}
         {tab === 'devices' && <Devices devices={devices} busy={busy} open={setForm} blocked={loading || !!failure} />}
         {tab === 'calls' && <Calls calls={calls} agents={agents} sources={sources} blocked={loading || !!failure} />}
       </div>
@@ -386,5 +399,79 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
     }} />}
     {form && <ManagementDialog form={form} close={() => setForm(null)} submit={input => void manage(input)} />}
     {secret && !form && !menu && !quick && !detail && <Credentials result={secret} close={() => setSecret(null)} />}
+    {chatgptSecret && !form && !menu && !quick && !detail &&
+      <Dialog title="Данные подключения ChatGPT" close={() => setChatgptSecret(null)}>
+        <p>Скопируйте эти данные в настройки OAuth в ChatGPT. Секрет показывается один раз.</p>
+        <div className="management-form">
+          <label>OAuth Client ID<input value={chatgptSecret.clientId} readOnly /></label>
+          <label>OAuth Client Secret<input value={chatgptSecret.clientSecret} readOnly autoComplete="off" /></label>
+          <button className="button primary" onClick={() => setChatgptSecret(null)}>Готово</button>
+        </div>
+      </Dialog>}
   </div>;
+}
+
+const stableChatGptCallback = 'https://chatgpt.com/connector_platform_oauth_redirect';
+
+function ChatGptPanel({ api, revision, busy, connect, changed }: {
+  api: <T>(path: string, body?: unknown, signal?: AbortSignal) => Promise<T>;
+  revision: number; busy: boolean; connect: () => void; changed: () => void;
+}) {
+  const [status, setStatus] = useState<ChatGptStatus | null>(null);
+  const [redirectUri, setRedirectUri] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<ChatGptStatus>('/chatgpt', undefined, controller.signal).then(result => {
+      if (controller.signal.aborted) return;
+      setStatus(result);
+      setRedirectUri(result.redirectUri ?? stableChatGptCallback);
+    }).catch(reason => { if (!controller.signal.aborted) setError(errorText(reason)); });
+    return () => controller.abort();
+  }, [api, revision]);
+
+  async function submit(path: string, body: unknown) {
+    setSaving(true);
+    setError('');
+    try {
+      await api(path, body);
+      setConfirmDisconnect(false);
+      changed();
+    } catch (reason) {
+      setError(errorText(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <section className="panel" aria-labelledby="chatgpt-heading">
+    <h2 id="chatgpt-heading">ChatGPT</h2>
+    <p>Подключите приватный MCP-сервер и подтвердите выдачу доступа на телефоне.</p>
+    {error && <Notice title={error} tone="danger" />}
+    {status && <div className="management-form">
+      <label>Адрес MCP<input value={status.url} readOnly /></label>
+      {status.clientId && <label>OAuth Client ID<input value={status.clientId} readOnly /></label>}
+      {status.clientId && <form className="management-form" onSubmit={event => {
+        event.preventDefault();
+        void submit('/chatgpt/callback', { redirectUri: redirectUri.trim() });
+      }}>
+        <label>OAuth callback из ChatGPT<input type="url" required value={redirectUri}
+          onChange={event => setRedirectUri(event.target.value)} /></label>
+        <button className="button secondary" disabled={busy || saving || redirectUri === status.redirectUri}>Сохранить callback</button>
+      </form>}
+      <div className="top-actions">
+        <button className="button primary" disabled={busy || saving} onClick={connect}>
+          {status.clientId ? 'Перевыпустить доступ' : 'Подключить ChatGPT'}
+        </button>
+        {status.clientId && <button className="button secondary" disabled={busy || saving}
+          onClick={() => setConfirmDisconnect(true)}>Отключить</button>}
+      </div>
+    </div>}
+    {confirmDisconnect && <Dialog title="Отключить ChatGPT?" close={() => setConfirmDisconnect(false)}>
+      <p>Подключение и выданные токены перестанут действовать.</p>
+      <button className="button secondary" disabled={saving} onClick={() => void submit('/chatgpt/disconnect', {})}>Отключить ChatGPT</button>
+    </Dialog>}
+  </section>;
 }

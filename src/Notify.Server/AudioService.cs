@@ -20,19 +20,22 @@ public sealed class AudioService(Database db, Settings settings, ILogger<AudioSe
     public static string FinalPath(Settings settings, string id) => Path.Combine(Directory(settings), id + ".wav");
     public static bool ValidId(string? id) => id is { Length: 32 } && id.All(c => char.IsAsciiHexDigitLower(c));
 
-    public async Task<object> UploadAsync(Actor actor, HttpRequest request, CancellationToken ct)
+    public Task<VoiceUploadResponse> UploadAsync(Actor actor, HttpRequest request, CancellationToken ct) =>
+        UploadAsync(actor, request.Body, request.ContentLength, ct);
+
+    internal async Task<VoiceUploadResponse> UploadAsync(Actor actor, Stream body, long? contentLength, CancellationToken ct)
     {
         if (actor.Kind is not ("device" or "integration")) throw new Fault(403, "device_or_integration_required");
         if (!await uploadGate.WaitAsync(0, ct)) throw new Fault(429, "audio_upload_busy");
         var id = Wire.Id(); var directory = Directory(settings); System.IO.Directory.CreateDirectory(directory); var part = PartPath(settings, id);
         try
         {
-            if (request.ContentLength is > MaxBytes) throw new Fault(413, "audio_too_large");
+            if (contentLength is > MaxBytes) throw new Fault(413, "audio_too_large");
             long total = 0; var buffer = new byte[65536];
             await using (var file = new FileStream(part, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous))
             {
                 int read;
-                while ((read = await request.Body.ReadAsync(buffer, ct)) > 0)
+                while ((read = await body.ReadAsync(buffer, ct)) > 0)
                 {
                     total += read;
                     if (total > MaxBytes) throw new Fault(413, "audio_too_large");
@@ -52,7 +55,7 @@ public sealed class AudioService(Database db, Settings settings, ILogger<AudioSe
                 });
             }
             catch { TryDelete(part); throw; }
-            return new { uploadId = id, durationMs = duration, sizeBytes = (int)total, expiresAt = Wire.Now + settings.AudioUploadMinutes * 60000L };
+            return new VoiceUploadResponse(id, duration, (int)total, Wire.Now + settings.AudioUploadMinutes * 60000L);
         }
         catch { TryDelete(part); throw; }
         finally { uploadGate.Release(); }

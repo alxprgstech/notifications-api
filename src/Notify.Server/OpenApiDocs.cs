@@ -772,7 +772,7 @@ internal static class OpenApiDocs
                 RateLimited, InternalError]));
 
         Add("POST", "/api/v1/management", new("beginManagement", "Управление", "Начать изменение, подтверждаемое телефоном",
-            "Только владелец. Создаёт отдельный elevated-запрос `_system`; само изменение выполняется лишь после подписанного ответа доверенного телефона. Нужен хотя бы один неотозванный device. Действия: `integration.create` (нужны `name` и `scopes`), `integration.revoke`/`device.revoke`/`source.update`/`agent.register` (нужен `targetId`). Одновременно допускается до 20 ожидающих запросов. Секреты выдаются один раз через `GET /management/{id}`.",
+            "Только владелец. Создаёт отдельный elevated-запрос `_system`; само изменение выполняется лишь после подписанного ответа доверенного телефона. Нужен хотя бы один неотозванный device. Действия: `integration.create` (нужны `name` и `scopes`), `integration.revoke`/`device.revoke`/`source.update`/`agent.register` (нужен `targetId`). Одновременно допускается до 20 ожидающих запросов. Действие `chatgpt.link` создаёт выделенный источник ChatGPT и выдаёт OAuth-реквизиты. Секреты выдаются один раз через `GET /management/{id}`.",
             ApiAuth.BearerOrWebPost, [
                 Ok<Management>("Запрос управления создан; ожидает ответа телефона."),
                 Error(400, "`invalid_management_action`, `invalid_integration`, `invalid_agent`, `target_required`; для webhook — `webhook_not_allowlisted_https`/`webhook_private_address`; тело — `invalid_request`.", """{"code":"invalid_management_action"}"""),
@@ -974,7 +974,7 @@ internal static class OpenApiDocs
         ["FcmInput.token"] = "FCM registration token длиной 10–4096; хранится только для доверенного устройства.",
         ["AudioGrantInput.challengeId"] = "Id audio-challenge, выданного для этого elevated-вложения.",
         ["AudioGrantInput.signature"] = "Base64 DER-подпись P-256/SHA-256 точных байтов audio-challenge.",
-        ["ManagementInput.action"] = "`integration.create`, `integration.revoke`, `device.revoke`, `source.update` или `agent.register`.",
+        ["ManagementInput.action"] = "`integration.create`, `integration.revoke`, `device.revoke`, `source.update`, `agent.register` или `chatgpt.link`.",
         ["ManagementInput.name"] = "Имя нового источника/агента; обязательно для create/register, ≤ 80 символов.",
         ["ManagementInput.targetId"] = "Id источника/устройства; обязателен для всех действий, кроме `integration.create`.",
         ["ManagementInput.scopes"] = "Права нового источника; обязательны для `integration.create`.",
@@ -1158,7 +1158,7 @@ internal static class OpenApiDocs
         ["CallViewResponse.securityLevel"] = ["standard", "elevated"],
         ["CallViewResponse.reason"] = ["rejected", "missed", "timeout", "disconnected", "unsupported", "busy", "invalid_audio", "degraded", "revoked", "ended"],
         ["ReceiptInput.status"] = ["device_received", "opened"],
-        ["ManagementInput.action"] = ["integration.create", "integration.revoke", "device.revoke", "source.update", "agent.register"],
+        ["ManagementInput.action"] = ["integration.create", "integration.revoke", "device.revoke", "source.update", "agent.register", "chatgpt.link"],
         ["ManagementInput.preview"] = ["hidden", "full"],
         ["Management.status"] = ["pending", "approved", "denied", "expired"],
         ["ManagementStatusResponse.status"] = ["pending", "approved", "denied", "expired"],

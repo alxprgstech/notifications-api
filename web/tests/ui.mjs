@@ -163,6 +163,7 @@ try {
   const devices = [{ id: 'phone', name: 'Мой Android', revoked: false }];
   const fixtures = {
     session: { actor: { kind: 'web' }, csrfToken: fixtureToken },
+    chatgpt: { url: origin + '/chatgpt/mcp', clientId: null, redirectUri: null },
     sources, devices,
     agents: [{ id: 'agent1', sourceId: 'fixture', name: 'Агент разработки', capabilities: ['text_tasks', 'realtime_audio'],
       revoked: false, online: true, lastSeenAt: now, sessions: [{ id: 'task1', name: 'Сборка' }] }],
@@ -213,6 +214,12 @@ try {
       if (++activePolls > 1) overlapping = true;
       try {
         const action = changes.at(-1).action;
+        if (action === 'chatgpt.link') {
+          fixtures.chatgpt.clientId = 'synthetic-chatgpt-client';
+          return await route.fulfill({ json: { status: 'approved', result: {
+            clientId: fixtures.chatgpt.clientId, clientSecret: 'synthetic-chatgpt-secret',
+          } } });
+        }
         if (action === 'integration.create') {
           if (++pollCount === 1) {
             await new Promise(resolve => setTimeout(resolve, 1700));
@@ -231,6 +238,13 @@ try {
       assert.equal(request.method(), 'POST');
       assert.equal(request.headers()['x-csrf-token'], fixtureToken);
       signedIn = false;
+      return route.fulfill({ status: 204 });
+    }
+    if (path === 'chatgpt/callback' || path === 'chatgpt/disconnect') {
+      assert.equal(request.method(), 'POST');
+      assert.equal(request.headers()['x-csrf-token'], fixtureToken);
+      if (path.endsWith('/callback')) fixtures.chatgpt.redirectUri = request.postDataJSON().redirectUri;
+      else Object.assign(fixtures.chatgpt, { clientId: null, redirectUri: null });
       return route.fulfill({ status: 204 });
     }
     if (Object.hasOwn(fixtures, path)) return route.fulfill({ json: fixtures[path] });
@@ -354,6 +368,21 @@ try {
   await credentials.waitFor({ state: 'hidden' });
   assert.equal(await page.getByText(fixtureSecret, { exact: true }).count(), 0);
 
+  await button('Подключить ChatGPT').click();
+  const chatgpt = page.getByRole('dialog', { name: 'Данные подключения ChatGPT' });
+  await chatgpt.waitFor();
+  assert.deepEqual(changes.at(-1), { action: 'chatgpt.link' });
+  assert.equal(await chatgpt.getByLabel('OAuth Client Secret').inputValue(), 'synthetic-chatgpt-secret');
+  await chatgpt.getByRole('button', { name: 'Готово' }).click();
+  const callback = page.getByLabel('OAuth callback из ChatGPT');
+  await callback.fill('https://chatgpt.com/connector/oauth/example');
+  await button('Сохранить callback').click();
+  await button('Сохранить callback').waitFor();
+  assert.equal(await callback.inputValue(), 'https://chatgpt.com/connector/oauth/example');
+  await button('Отключить').click();
+  await page.getByRole('dialog', { name: 'Отключить ChatGPT?' }).getByRole('button', { name: 'Отключить ChatGPT' }).click();
+  await button('Подключить ChatGPT').waitFor();
+
   await button('Устройства').click();
   await heading('Мой Android').waitFor();
   await shot('devices-dark');
@@ -396,12 +425,12 @@ try {
   await button('Открыть меню').click();
   await menu.getByRole('button', { name: 'Выйти' }).click();
   await login.waitFor();
-  assert.equal(changes.length, 5);
+  assert.equal(changes.length, 6);
   assert.deepEqual(errors, []);
   assert.deepEqual(external, [], 'Notify attempted external asset requests');
   await writeFile(new URL('result.json', artifact), JSON.stringify({
     login: true, returnPage: true, openapi: true, docs: true, guides: true, cabinet: 'synthetic fixtures',
-    history: true, management: true, theme: true, keyboard: true, mobileNoOverflow: true,
+    history: true, management: true, chatgpt: true, theme: true, keyboard: true, mobileNoOverflow: true,
     pageErrors: errors, externalRequests: external,
   }, null, 2));
   console.log('UI checks passed. Screenshots: artifacts/ui/redesign/screenshots');

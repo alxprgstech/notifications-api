@@ -1,34 +1,7 @@
 # Apply after compose.yml and compose.home.yml.
 services:
-  chatgpt:
-    build:
-      context: .
-      dockerfile: src/Notify.ChatGpt/Dockerfile
-    restart: unless-stopped
-    init: true
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    pids_limit: 128
-    mem_limit: ${CHATGPT_MEMORY_LIMIT:-256m}
-    cpus: '${CHATGPT_CPU_LIMIT:-0.5}'
-    env_file: ${CHATGPT_ENV_FILE:?Set the private OAuth adapter env file}
-    environment:
-      ChatGpt__PublicUrl: https://${CHATGPT_DOMAIN:?Set the OAuth adapter hostname}
-      ChatGpt__TrustedProxy: 172.30.89.2
-      ChatGpt__DataPath: /state
-      ChatGpt__NotifyUrl: http://notify:8080
-      ChatGpt__SileroUrl: http://silero:8080
-    volumes:
-      - chatgpt_data:/state
-    tmpfs: ['/tmp:size=16m,mode=1777']
-    networks:
-      default: {}
-      chatgpt_ingress:
-        ipv4_address: 172.30.89.3
-        aliases: [notify-chatgpt-ingress]
-      speech: {}
-    depends_on: [notify]
+  notify:
+    networks: [default, speech]
   silero:
     build: ./deploy/silero
     restart: unless-stopped
@@ -53,24 +26,7 @@ services:
       interval: 15s
       timeout: 3s
       retries: 6
-  caddy:
-    environment:
-      CHATGPT_DOMAIN: ${CHATGPT_DOMAIN:?Set the OAuth adapter hostname}
-    volumes:
-      - ./deploy/chatgpt.caddy:/etc/caddy/notify-chatgpt/chatgpt.caddy:ro
-    networks:
-      default: {}
-      chatgpt_ingress:
-        ipv4_address: 172.30.89.2
 
 networks:
-  chatgpt_ingress:
-    internal: true
-    ipam:
-      config:
-        - subnet: 172.30.89.0/28
   speech:
     internal: true
-
-volumes:
-  chatgpt_data:
