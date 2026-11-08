@@ -79,6 +79,9 @@ try {
   await heading('Подключите свой источник').waitFor();
   await page.getByText('ALXPRGS Notify API', { exact: true }).first().waitFor({ timeout: 20_000 });
   await shot('docs-light');
+  await page.getByText('Сессия', { exact: true }).first().click();
+  await page.getByText('Текущая сессия, actor и CSRF', { exact: true }).first().click();
+  await page.getByText(/Нет или недействительны Bearer-токен либо cookie веб-сессии/).first().waitFor({ timeout: 10_000 });
   await theme().selectOption('dark');
   await waitTheme('dark');
   await page.waitForFunction(() => {
@@ -89,7 +92,7 @@ try {
   await shot('docs-dark');
   const guides = {
     contract: 'Контракт v1', security: 'Безопасность и SSO', operations: 'Установка и эксплуатация',
-    home: 'Notify на домашнем Windows-ПК',
+    home: 'Самостоятельное размещение Notify',
   };
   for (const [id, name] of Object.entries(guides)) {
     await page.goto(origin + '/docs/guide/' + id);
@@ -100,6 +103,21 @@ try {
   await page.goto(origin + '/docs/guide/contract');
   await heading(guides.contract).waitFor();
   await shot('docs-guide-dark');
+  await page.goto(origin + '/docs/guide/home');
+  await heading(guides.home).waitFor();
+  assert.equal(await page.getByText(/2026-11-07|Размещение владельца/).count(), 0);
+  assert.equal(await page.getByRole('navigation', { name: 'Разделы документации' }).getByRole('link').count(), 5);
+  await shot('docs-home-dark');
+  await page.getByRole('link', { name: 'CONTRACT', exact: true }).first().click();
+  await heading(guides.contract).waitFor();
+  await page.goto(origin + '/docs/guide/home');
+  await heading(guides.home).waitFor();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await noOverflow('Mobile home guide');
+  await shot('docs-home-mobile');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(origin + '/docs/guide/contract');
+  await heading(guides.contract).waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   await noOverflow('Mobile guide');
   await shot('docs-guide-mobile');

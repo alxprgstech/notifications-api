@@ -5,7 +5,7 @@ description: Send notifications and request action-specific human decisions thro
 
 # ALXPRGS Notify
 
-Use the connected Notify MCP tools. If only Python is configured, use the installed `alxprgs_notify` package with `NOTIFY_URL` and `NOTIFY_TOKEN` from the environment; do not read or print token values.
+Use the connected Notify MCP tools. If only Python is configured, use the installed `alxprgs_notify` package with `NOTIFY_URL` and `NOTIFY_TOKEN` from the environment; do not read or print token values. `GET /api/v1/session` reports the current `actor` and `csrfToken`; an integration sender does not need CSRF, and an empty-body 401 means the token is missing, expired, or revoked.
 
 For an informational update call `send_notification`. When a decision is needed, call `request_confirmation` with a concise action description, consequences, expiration and a stable idempotency key for that action. Use `elevated` for sensitive actions. Do not include credentials or unnecessary private data in notification text.
 

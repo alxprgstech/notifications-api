@@ -24,7 +24,7 @@ export default function Reference() {
       <section className="docs-intro" aria-labelledby="docs-title">
         <p className="eyebrow"><Icon name="book" size={16} /> ДОКУМЕНТАЦИЯ ДЛЯ РАЗРАБОТЧИКОВ</p>
         <h1 id="docs-title">Подключите свой источник</h1>
-        <p className="docs-lead">Создайте интеграцию в кабинете и подтвердите её на телефоне. Передавайте токен через <code>Authorization: Bearer</code>, ключ повторной отправки — через <code>Idempotency-Key</code>.</p>
+        <p className="docs-lead">Создайте интеграцию в кабинете и подтвердите её на телефоне. Передавайте токен через <code>Authorization: Bearer</code>, ключ повторной отправки — через <code>Idempotency-Key</code>. Текущую учётную запись и CSRF-токен возвращает <code>GET /api/v1/session</code>; веб-кабинет дополнительно присылает <code>X-CSRF-Token</code> и точный <code>Origin</code>.</p>
         <nav className="guide-links" aria-label="Руководства">
           {guideLinks.map(([id, title]) => <a className="button secondary" key={id} href={'/docs/guide/' + id}>{title} <Icon name="arrow" size={15} /></a>)}
         </nav>

@@ -1,10 +1,14 @@
 # alxprgs-notify 0.5.0
 
-Приватный Python-клиент ALXPRGS Notify. Python 3.11+, sync/async HTTP, проверка подписи webhook, optional MCP stdio adapter. Инструкции: `../../docs/CONTRACT.md`; пример: `../../examples/agent.py`.
+Приватный Python-клиент ALXPRGS Notify. Python 3.11+, sync/async HTTP, проверка подписи webhook, optional MCP stdio adapter. Инструкции: `../../docs/CONTRACT.md`; операции, поля и коды ошибок: `/docs` (`/openapi/v1.json`); пример: `../../examples/agent.py`.
 
 Установка из исходников: `pip install .` или `pip install '.[mcp]'`. Для исходящего подключения агента: `pip install '.[agent]'`. Установка из wheel не требует исходников сервера. Не публикуйте пакет без отдельного поручения владельца.
 
-Токен интеграции передаётся конструктору `NotifyClient` / `AsyncNotifyClient`; не выводите его в лог. `wait()` возвращает pending при таймауте: это не согласие. `verify_webhook()` проверяет исходные bytes, timestamp и HMAC; дедупликация eventId выполняется получателем.
+## Авторизация и ошибки
+
+Токен интеграции передаётся конструктору `NotifyClient` / `AsyncNotifyClient` и уходит в `Authorization: Bearer`. Не выводите его в лог. Проверить токен и получить `actor`/`csrfToken` можно через `GET /api/v1/session`; SDK-отправителю CSRF не нужен. Для отправки используйте стабильный `Idempotency-Key` (8–128 символов): повтор с тем же содержимым возвращает прежнее событие, изменённое — 409.
+
+Ошибки приходят как HTTP 4xx/5xx с `{"code":"..."}`; 401 без тела означает отсутствие/недействительность токена. 429 может быть общим лимитом IP (пустое тело) или `source_daily_quota_exceeded`. `wait()` возвращает pending при таймауте: это не согласие. `verify_webhook()` проверяет исходные bytes, timestamp и HMAC; дедупликация eventId выполняется получателем.
 
 `AgentConnector` подключается к `/api/v1/agents/connect` исходящим WebSocket, шлёт hello/heartbeat, вызывает переданный `AgentRuntime` (например, `CallbackRuntime`) и подтверждает успешные команды. Он не открывает входящий порт и не импортирует код из сети. `Transcriber`/`Synthesizer` — протоколы для вашей среды агента; речевые модели не входят в сервер Notify. Пример: `../../examples/agent_connector.py`.
 

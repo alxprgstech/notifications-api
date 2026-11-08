@@ -144,7 +144,7 @@ export const sections = [
 export type Section = (typeof sections)[number]['id'];
 export const guideLinks = [
   ['contract', 'API, MCP и Python SDK'], ['security', 'Вход и подтверждения'],
-  ['operations', 'Подключение и эксплуатация'], ['home', 'Домашний Docker'],
+  ['operations', 'Подключение и эксплуатация'], ['home', 'Самостоятельное размещение'],
 ] as const;
 
 export function QuickJump({ close, navigate }: { close: () => void; navigate: (id: Section) => void }) {
