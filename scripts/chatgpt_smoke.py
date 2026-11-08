@@ -64,6 +64,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def send(self, status, value=None, location=None):
         self.send_response(status)
+        self.send_header("Connection", "close")
         if location:
             self.send_header("Location", location)
         if value is not None:
@@ -133,8 +134,10 @@ class FaultProxy(Handler):
                                       headers=headers, content=self.rfile.read(length) if length else None)
         if self.path == "/api/v1/notifications" and response.is_success and headers.get("Idempotency-Key") == self.server.drop_key:
             self.server.drop_key = None
-            return
+            # The gateway loses the successful upstream response after Notify has committed.
+            return self.send(502, {"code": "notify_unavailable"})
         self.send_response(response.status_code)
+        self.send_header("Connection", "close")
         if content_type := response.headers.get("content-type"):
             self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(response.content)))
@@ -151,6 +154,7 @@ class FixtureSpeech(Handler):
                 wav.writeframes(b"\x10\x00\xf0\xff" * 8000)
             body = output.getvalue()
         self.send_response(200)
+        self.send_header("Connection", "close")
         self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
