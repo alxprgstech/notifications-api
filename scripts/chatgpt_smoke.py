@@ -179,6 +179,8 @@ def start(project, url, values, directory):
     env = {key: value for key, value in os.environ.items() if not key.lower().startswith(("notify__", "chatgpt__"))}
     env.update(ASPNETCORE_ENVIRONMENT="Development", ASPNETCORE_URLS=url, **values)
     assembly = ROOT / f"src/{project}/bin/Release/net10.0/{project}.dll"
+    if not assembly.is_file():
+        raise RuntimeError(f"Missing Release build for {project}. Run dotnet build Notify.sln -c Release.")
     with (directory / f"{project}.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(["dotnet", str(assembly)], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
