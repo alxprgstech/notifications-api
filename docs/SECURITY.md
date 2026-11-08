@@ -53,9 +53,17 @@ Notify не исполняет произвольный текст как ком
 
 Android запускает foreground service только после явного принятия/начала звонка и разрешения микрофона, показывает ongoing CallStyle notification; permission на микрофон/Bluetooth запрашивается лишь для звонка. Отказ в разрешении не обходится: звонок не начинается. Телефон использует системный audio focus/route; динамик, mute и завершение доступны. Речевые модели работают у агента/провайдера, не на общем сервере.
 
+## Сессия и CSRF
+
+`GET /api/v1/session` — контрольная точка авторизации. Запрос не имеет тела, path- и query-параметров и принимает либо `Authorization: Bearer <токен интеграции/устройства>`, либо HttpOnly cookie веб-сессии `notify.session` (в HTTPS — `__Host-notify.session`). Ответ содержит `actor` (`kind`, `id`, `scopes`, `sessionId`, `isOwner`) и `csrfToken`. Без действующих учётных данных middleware возвращает 401 с пустым телом.
+
+`csrfToken` выдаётся при каждом успешном вызове вместе с cookie `notify.csrf`. Он нужен только веб-сессии: небезопасный метод (`POST`) к `/api/v1` требует `X-CSRF-Token` и `Origin`, точно равный `Notify__PublicUrl`; иначе 403 `invalid_csrf`/`invalid_origin`. Bearer-клиенты не проходят CSRF-проверку и не должны присылать cookie. Токен не хранится в localStorage/sessionStorage.
+
+Кто допущен к операции, определяется обработчиком и scope, а не только аутентификацией: владелец (`device`/`web`), интеграция с конкретным scope или только устройство. Точная матрица — в описании каждой операции в `/docs`; общие коды отказа — `scope_required`, `owner_required`, `device_required`, `web_required`.
+
 ## Веб-кабинет
 
-OIDC confidential client, PKCE/state/nonce, host-only HttpOnly cookie, SameSite=Lax, Secure в HTTPS-профиле. POST требует анти-CSRF токен и точный Origin. Credential не хранится в localStorage/sessionStorage.
+OIDC confidential client, PKCE/state/nonce, host-only HttpOnly cookie, SameSite=Lax, Secure в HTTPS-профиле. POST требует анти-CSRF токен и точный Origin. Credential не хранится в localStorage/sessionStorage. Сессия живёт 8 часов без sliding expiration; выход удаляет только её, не отзывая Bearer-токены.
 
 Управление источниками и устройствами создаёт отдельный elevated-запрос `_system`. Только подписанный ответ телефона выполняет изменение. Результат с новым токеном зашифрован Data Protection и выдаётся один раз только инициировавшей сессии. Потерянный ответ не восстанавливается повторной выдачей секрета: создайте новую интеграцию и отзовите прежнюю.
 

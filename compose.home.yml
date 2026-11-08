@@ -12,7 +12,7 @@ services:
     mem_limit: 128m
     cpus: '0.25'
     environment:
-      NOTIFY_DOMAIN: notify.alxprgs.tech
+      NOTIFY_DOMAIN: ${NOTIFY_DOMAIN:-notify.alxprgs.tech}
     ports: ['80:8080', '443:8443']
     volumes:
       - ./deploy/Caddyfile.home:/etc/caddy/Caddyfile:ro

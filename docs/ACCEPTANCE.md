@@ -1,10 +1,19 @@
-# Приёмка 0.5.0 — 2026-11-04
+# Приёмка 0.5.0
 
-## Дополнение 2026-11-07: домашний Docker и персональный APK
+## Документация и OpenAPI
 
-Запуск и ограничения — [HOME_HOSTING](HOME_HOSTING.md). Проверены публичные TLS/HTTPS readiness, OIDC redirect с PKCE, соответствие assetlinks сертификату APK и Google OAuth. Release собран с Firebase и подписан; 10 JVM tests PASS. Реальные FCM/SSO enrollment/биометрия/голос на телефоне не проверены. Записи о неразвёрнутом сервисе и unsigned APK ниже относятся к исторической локальной приёмке.
+- `dotnet test Notify.sln --no-restore -c Release`: **85 PASS** на настоящей SQLite; добавлены проверки полноты OpenAPI, `GET /api/v1/session` (успех/401) и репрезентативных HTTP-кодов.
+- `npm run build` в `web`: **PASS**; `npm run test:ui`: **PASS** (четыре руководства, ссылка home → contract, Scalar, обе темы, mobile без overflow, без JS errors и внешних запросов).
+- `/openapi/v1.json`: **42 пути / 45 операций**, у каждой есть summary, description, operationId, tag, security и responses с описаниями; anonymous-схемы удалены. `GET /api/v1/session` не имеет тела/path/query, документирует Bearer и cookie, `actor`, `csrfToken`, 200/401/429; `POST /api/v1/calls/challenge` содержит 200.
+- Локальный HTTP-стенд: `GET /api/v1/session` без токена — 401 с пустым телом; с синтетическим токеном — 200 с `actor.kind=integration` и непустым `csrfToken`; проверены `invalid_idempotency_key`, `invalid_wait_seconds`, `device_required`, `call_verification_not_required` и конфликт идемпотентности.
 
-## Дополнение 2026-11-05: атомарная очистка реестра агента
+Внешние сценарии (реальные SSO, Firebase/FCM, физический Android, аппаратная биометрия, речевой провайдер) этим прогоном не проверялись.
+
+## Дополнительно проверено
+
+Публичные TLS/HTTPS readiness, OIDC redirect с PKCE, assetlinks и Google OAuth проверены на настроенном стенде. Release собран с Firebase и подписан; JVM-тесты проходят. Реальные FCM/SSO enrollment/биометрия/голос на телефоне не проверены. Записи о неразвёрнутом сервисе и unsigned APK ниже относятся к исторической локальной приёмке.
+
+## Дополнительно: атомарная очистка реестра агента
 
 - В `AgentHub.Run` раздельные проверка ссылки и удаление по ключу заменены атомарным `TryRemove(KeyValuePair)`: очистка старого соединения не удаляет запись нового подключения, появившуюся между этими операциями.
 - Существующий тест замены зависшего соединения усилен: после завершения старого `Run` новое соединение должно обработать heartbeat и вернуть `heartbeat_ack`. Повторный `dotnet test Notify.sln --no-restore -c Release`: **73 PASS**, без пропусков.
@@ -46,12 +55,12 @@
 
 ## Что ещё не принято
 
-1. Production не менялся. DNS/TLS, nginx, SSO clients/step-up policy и Firebase владелец ещё не настроил.
+1. Внешняя настройка DNS/TLS, SSO clients/step-up policy и Firebase не входила в локальную приёмку. Production этим прогоном не изменялся.
 2. Нет подключённого ADB-устройства: реальный FCM incoming → CallStyle/full-screen intent (включая ограничения Android 14+) → accept → микрофон/динамик/Bluetooth, Doze/блокировка, process death и аппаратная биометрия **не проверены**. Instrumentation APK собран, но JVM-тесты маршрутизации не заменяют системную проверку; `adb devices` пуст.
 3. Нет реального речевого провайдера/VAD/STT/TTS агента. Smoke подтверждает транспорт, generation и подписанные байты, но не качество ИИ-диалога.
 4. APK release unsigned; личный signing key не создавался и не публиковался.
-5. GitHub Actions не запускались в облаке; изменения сохранены локальными коммитами, push не выполнялся.
-6. Docker Desktop Linux/amd64 — не EC2 t3.small; CPU credits, реальная сеть и production-нагрузка не измерены.
+5. CI в облаке не запускался; локальные артефакты не публиковались.
+6. Docker Desktop Linux/amd64 не эквивалентен целевому облачному хосту: CPU credits, реальная сеть и production-нагрузка не измерены.
 7. Incoming-уведомление и FCM data-only не проверены на физическом Android; если система отказывает в full-screen intent, остаётся уведомление/опрос `/calls/incoming`.
 
 ## Воспроизведение
