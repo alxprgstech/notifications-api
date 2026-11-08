@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Notify.Server", "src\Notify
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Notify.Specs", "tests\Notify.Specs\Notify.Specs.csproj", "{F7A19841-CFA1-4A88-8834-A2C35AD8726D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Notify.ChatGpt", "src\Notify.ChatGpt\Notify.ChatGpt.csproj", "{099A0EFB-5D5C-4159-A244-906A15FCBB10}"
+EndProject
 Global
  GlobalSection(SolutionConfigurationPlatforms) = preSolution
   Debug|Any CPU = Debug|Any CPU
@@ -20,5 +22,9 @@ Global
   {F7A19841-CFA1-4A88-8834-A2C35AD8726D}.Debug|Any CPU.Build.0 = Debug|Any CPU
   {F7A19841-CFA1-4A88-8834-A2C35AD8726D}.Release|Any CPU.ActiveCfg = Release|Any CPU
   {F7A19841-CFA1-4A88-8834-A2C35AD8726D}.Release|Any CPU.Build.0 = Release|Any CPU
+  {099A0EFB-5D5C-4159-A244-906A15FCBB10}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+  {099A0EFB-5D5C-4159-A244-906A15FCBB10}.Debug|Any CPU.Build.0 = Debug|Any CPU
+  {099A0EFB-5D5C-4159-A244-906A15FCBB10}.Release|Any CPU.ActiveCfg = Release|Any CPU
+  {099A0EFB-5D5C-4159-A244-906A15FCBB10}.Release|Any CPU.Build.0 = Release|Any CPU
  EndGlobalSection
 EndGlobal

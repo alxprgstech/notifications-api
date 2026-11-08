@@ -1,0 +1,10 @@
+http://{$CHATGPT_DOMAIN}:8080 {
+    redir https://{$CHATGPT_DOMAIN}{uri} permanent
+}
+
+{$CHATGPT_DOMAIN} {
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy notify-chatgpt-ingress:8080 {
+        flush_interval -1
+    }
+}
