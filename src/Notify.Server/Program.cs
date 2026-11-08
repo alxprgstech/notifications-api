@@ -45,24 +45,7 @@ builder.Services.AddHttpClient("webhook", c => c.Timeout = TimeSpan.FromSeconds(
 builder.Services.AddHttpContextAccessor();
 builder.Services.ConfigureHttpJsonOptions(o => { o.SerializerOptions.UnmappedMemberHandling = System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow; o.SerializerOptions.RespectNullableAnnotations = true; o.SerializerOptions.RespectRequiredConstructorParameters = true; });
 builder.WebHost.ConfigureKestrel(o => { o.Limits.MaxRequestBodySize = 11 * 1024 * 1024; o.Limits.MaxConcurrentConnections = 128; });
-builder.Services.AddOpenApi(o =>
-{
-    o.AddDocumentTransformer((document, _, _) =>
-    {
-        document.Info.Title = "ALXPRGS Notify API"; document.Info.Version = "v1";
-        document.Info.Description = "Messages, action-specific confirmations, structured forms, voice messages and live calls. Integration tokens cannot submit user decisions or start a call for the owner.";
-        document.Components ??= new OpenApiComponents(); document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
-        document.Components.SecuritySchemes["Bearer"] = new OpenApiSecurityScheme { Type = SecuritySchemeType.Http, Scheme = "bearer", Description = "Integration/device token. Device enrollment requires an SSO Access Token; never an ID Token." };
-        return Task.CompletedTask;
-    });
-    o.AddOperationTransformer((operation, context, _) =>
-    {
-        var path = context.Description.RelativePath ?? "";
-        if (path.StartsWith("api/v1/", StringComparison.Ordinal) && !(path.StartsWith("api/v1/device-enrollments/", StringComparison.Ordinal) && context.Description.HttpMethod == "GET"))
-            operation.Security = [new OpenApiSecurityRequirement { [new OpenApiSecuritySchemeReference("Bearer", context.Document)] = [] }];
-        return Task.CompletedTask;
-    });
-});
+builder.Services.AddOpenApi(OpenApiDocs.Configure);
 builder.Services.AddMcpServer().WithHttpTransport().WithTools<NotifyTools>();
 var secureCookies = new Uri(settings.PublicUrl).Scheme == "https";
 builder.Services.AddOptions<ForwardedHeadersOptions>().Configure<Settings>((o, config) =>
