@@ -229,7 +229,7 @@ HTTP endpoint `/mcp`, тот же токен интеграции. Инстру�
 
 Агентский коннектор — отдельный extra `[agent]`: `AgentConnector` подключается к Notify, шлёт hello/heartbeat с `callProtocols`, вызывает переданный `AgentRuntime`/`CallbackRuntime` для каждой команды и подтверждает успешную обработку. Если `hello_ack.callProtocol` не равен v2, `dial_call`/`call_audio` сразу возвращают `call_protocol_unsupported`, а текстовые команды работают. `Transcriber` и `Synthesizer` — протоколы для среды агента; Notify не запускает речевые модели и не импортирует код из сети. `dial_call(session_id=..., security_level=...)` инициирует входящий звонок владельцу (без открытия микрофона), `wait_call(call_id)` ждёт accepted/ended; `CallAudio` в v2 передаёт `generation`. Необязательные обработчики `on_accepted`/`on_rejected` дополняют `on_invite/on_interrupt/on_ended`.
 
-Голосовые методы SDK: `upload_audio(wav)`, `send_voice(..., wav=...)`, `download_audio(audio_id, grant=...)`, `voice_status(id)`; async-клиент повторяет их. MCP не передаёт бинарные файлы, поэтому голос доступен через SDK/HTTP.
+Голосовые методы SDK: `upload_audio(wav)`, `send_voice(..., wav=...)`, `download_audio(audio_id, grant=...)`, `voice_status(id)`; async-клиент повторяет их. Для ChatGPT отдельный [OAuth-адаптер](CHATGPT_MCP.md) принимает текст через MCP-инструмент `send_voice`, синтезирует WAV локально и передаёт его по HTTP.
 
 Остановленного агента сервис сам не возобновляет. Среда агента должна ждать/опрашивать состояние либо принимать webhook. Skill находится в `skills/alxprgs-notify`; глобальная установка не требуется.
 

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol;
@@ -13,16 +14,21 @@ namespace Notify.ChatGpt;
 [McpServerToolType]
 internal sealed class ChatGptTools(NotifyApi notify, VoiceSender voice, IHttpContextAccessor context)
 {
+    private const string SchemeStart = "[{\"type\":\"oauth2\",\"scopes\":[\"";
+    private const string SchemeEnd = "\"]}]";
+    [McpMeta("securitySchemes", "", JsonValue = SchemeStart + AdapterOAuth.Send + SchemeEnd)]
     [McpServerTool(Name = "send_notification"), Description("Send a text notification to the owner's Android devices.")]
     public Task<JsonElement> SendNotification(string title, string body, string idempotencyKey, CancellationToken ct,
         string? iconId = null, string? correlationId = null) =>
         Create(AdapterOAuth.Send, new { kind = "message", title, body, iconId, correlationId }, idempotencyKey, ct);
 
+    [McpMeta("securitySchemes", "", JsonValue = SchemeStart + AdapterOAuth.Create + SchemeEnd)]
     [McpServerTool(Name = "request_confirmation"), Description("Request a decision on Android. Elevated requests require verification on the phone. Pending, expired, cancelled or denied are never approval.")]
     public Task<JsonElement> RequestConfirmation(string title, string body, DateTimeOffset expiresAt, string idempotencyKey,
         CancellationToken ct, string securityLevel = "standard", bool allowCustom = true, string? iconId = null, string? correlationId = null) =>
         Create(AdapterOAuth.Create, new { kind = "confirmation", title, body, expiresAt, securityLevel, allowCustom, iconId, correlationId }, idempotencyKey, ct);
 
+    [McpMeta("securitySchemes", "", JsonValue = SchemeStart + AdapterOAuth.Create + SchemeEnd)]
     [McpServerTool(Name = "request_form"), Description("Ask the owner to complete a form on Android. fieldsJson is a JSON array of Notify form fields. Elevated forms require verification on the phone.")]
     public async Task<JsonElement> RequestForm(string title, string body, DateTimeOffset expiresAt, string idempotencyKey,
         string fieldsJson, CancellationToken ct, string securityLevel = "standard", string? iconId = null, string? correlationId = null)
@@ -35,6 +41,7 @@ internal sealed class ChatGptTools(NotifyApi notify, VoiceSender voice, IHttpCon
         return await notify.Create(new { kind = "form", title, body, expiresAt, securityLevel, iconId, correlationId, form = new { fields } }, idempotencyKey, ct);
     }
 
+    [McpMeta("securitySchemes", "", JsonValue = SchemeStart + AdapterOAuth.Read + SchemeEnd)]
     [McpServerTool(Name = "get_request", ReadOnly = true), Description("Read the current result of a request created by this Notify source.")]
     public async Task<JsonElement> GetRequest(string id, CancellationToken ct)
     {
@@ -42,6 +49,7 @@ internal sealed class ChatGptTools(NotifyApi notify, VoiceSender voice, IHttpCon
         return await notify.Send(HttpMethod.Get, PathFor(id), null, null, ct);
     }
 
+    [McpMeta("securitySchemes", "", JsonValue = SchemeStart + AdapterOAuth.Read + SchemeEnd)]
     [McpServerTool(Name = "wait_for_response", ReadOnly = true), Description("Wait up to 25 seconds. A pending response means the owner has not decided.")]
     public async Task<JsonElement> WaitForResponse(string id, CancellationToken ct, int seconds = 20)
     {
@@ -50,6 +58,7 @@ internal sealed class ChatGptTools(NotifyApi notify, VoiceSender voice, IHttpCon
         return await notify.Send(HttpMethod.Get, $"{PathFor(id)}/wait?seconds={seconds}", null, null, ct);
     }
 
+    [McpMeta("securitySchemes", "", JsonValue = SchemeStart + AdapterOAuth.Cancel + SchemeEnd)]
     [McpServerTool(Name = "cancel_request", Destructive = true), Description("Cancel a pending request created by this Notify source.")]
     public async Task<JsonElement> CancelRequest(string id, CancellationToken ct)
     {
@@ -57,6 +66,7 @@ internal sealed class ChatGptTools(NotifyApi notify, VoiceSender voice, IHttpCon
         return await notify.Send(HttpMethod.Post, PathFor(id) + "/cancel", null, null, ct);
     }
 
+    [McpMeta("securitySchemes", "", JsonValue = SchemeStart + AdapterOAuth.Send + SchemeEnd)]
     [McpServerTool(Name = "send_voice"), Description("Synthesize Russian text locally with Silero baya and send it as a standard Android voice notification. Use the same idempotencyKey when retrying.")]
     public async Task<JsonElement> SendVoice(string title, string text, DateTimeOffset expiresAt, string idempotencyKey, CancellationToken ct)
     {
@@ -94,7 +104,11 @@ internal sealed class NotifyApi(HttpClient client, AdapterSettings settings)
     }
 
     public Task<JsonElement> Create(object body, string key, CancellationToken ct) =>
-        Send(HttpMethod.Post, "api/v1/notifications", JsonContent.Create(body), key, ct);
+        Send(HttpMethod.Post, "api/v1/notifications", JsonBody(body), key, ct);
+
+    // Send a bounded Content-Length even to the small private Silero HTTP server.
+    internal static StringContent JsonBody(object body) =>
+        new(JsonSerializer.Serialize(body, JsonSerializerOptions.Web), Encoding.UTF8, "application/json");
 
     public async Task<string> Upload(byte[] wav, CancellationToken ct)
     {
@@ -150,7 +164,7 @@ internal sealed class VoiceSender(NotifyApi notify, IHttpClientFactory clients, 
     {
         NotifyApi.ValidateKey(key);
         if (string.IsNullOrWhiteSpace(title) || title.Length > 160 || title.Any(char.IsControl) ||
-            string.IsNullOrWhiteSpace(text) || text.Length > 1500)
+            string.IsNullOrWhiteSpace(text) || text.Length > 1000)
             throw new McpException("invalid_voice_message");
         expiresAt = expiresAt.ToUniversalTime();
         var fingerprint = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { title, text, expiresAt })));
@@ -192,7 +206,7 @@ internal sealed class VoiceSender(NotifyApi notify, IHttpClientFactory clients, 
         deadline.CancelAfter(TimeSpan.FromSeconds(30));
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "synthesize") { Content = JsonContent.Create(new { text }) };
+            using var request = new HttpRequestMessage(HttpMethod.Post, "synthesize") { Content = NotifyApi.JsonBody(new { text }) };
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             const int maxBytes = 10 * 1024 * 1024;
             if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType != "audio/wav" ||

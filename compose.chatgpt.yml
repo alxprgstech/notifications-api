@@ -25,6 +25,7 @@ services:
     networks:
       default: {}
       chatgpt_ingress:
+        ipv4_address: 172.30.89.3
         aliases: [notify-chatgpt-ingress]
       speech: {}
     depends_on: [notify]

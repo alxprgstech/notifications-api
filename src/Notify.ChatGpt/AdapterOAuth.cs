@@ -1,9 +1,12 @@
 using System.Security.Claims;
 using System.Text;
 using System.Text.Encodings.Web;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
 using OpenIddict.Abstractions;
 using OpenIddict.Server.AspNetCore;
 using static OpenIddict.Abstractions.OpenIddictConstants;
@@ -18,6 +21,25 @@ internal static class AdapterOAuth
     public const string Cancel = "requests:cancel";
     public static readonly string[] Scopes = [Send, Create, Read, Cancel];
     private const string Scheme = OpenIddictServerAspNetCoreDefaults.AuthenticationScheme;
+
+    public static CallToolResult? ChallengeTool(RequestContext<CallToolRequestParams> context, AdapterSettings settings)
+    {
+        if (context.MatchedPrimitive is not McpServerTool tool ||
+            tool.ProtocolTool.Meta?["securitySchemes"]?[0]?["scopes"]?[0]?.GetValue<string>() is not { } scope ||
+            context.User?.HasScope(scope) == true)
+            return null;
+        return new CallToolResult
+        {
+            IsError = true,
+            Content = [new TextContentBlock { Text = "insufficient_scope" }],
+            Meta = new JsonObject
+            {
+                ["mcp/www_authenticate"] = new JsonArray(
+                    $"Bearer resource_metadata=\"{settings.Metadata}\", scope=\"{scope}\", error=\"insufficient_scope\", " +
+                    "error_description=\"Reconnect Notify to grant the required scope\"")
+            }
+        };
+    }
 
     public static bool HasExactResource(OpenIddictRequest request, string expected)
     {

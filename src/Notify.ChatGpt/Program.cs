@@ -163,7 +163,9 @@ builder.Services.AddHttpClient("silero", client =>
 }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
 builder.Services.AddSingleton<VoiceLocks>();
 builder.Services.AddScoped<VoiceSender>();
-builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<ChatGptTools>();
+builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<ChatGptTools>()
+    .WithRequestFilters(filters => filters.AddCallToolFilter(next => (context, ct) =>
+        AdapterOAuth.ChallengeTool(context, settings) is { } challenge ? ValueTask.FromResult(challenge) : next(context, ct)));
 
 var app = builder.Build();
 await using (var scope = app.Services.CreateAsyncScope())

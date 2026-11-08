@@ -14,7 +14,7 @@ import torch
 
 MODEL_PATH = "/model/v5_6_ru.pt"
 MODEL_SHA256 = "04cc9b1d08ce38bcaa9d02c488d80d3e6806d17f7eaa7c95982f36a3cbf50b2e"
-MAX_TEXT = 1500
+MAX_TEXT = 1000
 MAX_DURATION = 300
 
 
@@ -27,7 +27,7 @@ def synthesize(model, text):
     if sys.byteorder != "little":
         pcm.byteswap()
     result = subprocess.run(
-        ["ffmpeg", "-nostdin", "-loglevel", "error", "-threads", "1",
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-threads", "1", "-filter_threads", "1",
          "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", "pipe:0",
          "-f", "s16le", "-ar", "16000", "-ac", "1", "pipe:1"],
         input=pcm.tobytes(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -71,7 +71,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(400, b"invalid_request")
             try:
                 audio = synthesize(self.server.model, text)
-            except Exception:
+            except Exception as error:
+                print(f"Silero synthesis failed: {type(error).__name__}", file=sys.stderr, flush=True)
                 return self.reply(422, b"synthesis_failed")
             return self.reply(200, audio, "audio/wav")
         finally:
