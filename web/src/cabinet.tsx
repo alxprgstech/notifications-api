@@ -403,8 +403,8 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
       <Dialog title="Данные подключения ChatGPT" close={() => setChatgptSecret(null)}>
         <p>Скопируйте эти данные в настройки OAuth в ChatGPT. Секрет показывается один раз.</p>
         <div className="management-form">
-          <label>OAuth Client ID<input value={chatgptSecret.clientId} readOnly /></label>
-          <label>OAuth Client Secret<input value={chatgptSecret.clientSecret} readOnly autoComplete="off" /></label>
+          <label className="field">OAuth Client ID<input value={chatgptSecret.clientId} readOnly /></label>
+          <label className="field">OAuth Client Secret<input value={chatgptSecret.clientSecret} readOnly autoComplete="off" /></label>
           <button className="button primary" onClick={() => setChatgptSecret(null)}>Готово</button>
         </div>
       </Dialog>}
@@ -446,18 +446,20 @@ function ChatGptPanel({ api, revision, busy, connect, changed }: {
     }
   }
 
-  return <section className="panel" aria-labelledby="chatgpt-heading">
-    <h2 id="chatgpt-heading">ChatGPT</h2>
-    <p>Подключите приватный MCP-сервер и подтвердите выдачу доступа на телефоне.</p>
+  return <section className="panel entity-card chatgpt-panel" aria-labelledby="chatgpt-heading">
+    <header>
+      <h2 id="chatgpt-heading">ChatGPT</h2>
+      <p>Подключите приватный MCP-сервер и подтвердите выдачу доступа на телефоне.</p>
+    </header>
     {error && <Notice title={error} tone="danger" />}
     {status && <div className="management-form">
-      <label>Адрес MCP<input value={status.url} readOnly /></label>
-      {status.clientId && <label>OAuth Client ID<input value={status.clientId} readOnly /></label>}
+      <label className="field">Адрес MCP<input value={status.url} readOnly /></label>
+      {status.clientId && <label className="field">OAuth Client ID<input value={status.clientId} readOnly /></label>}
       {status.clientId && <form className="management-form" onSubmit={event => {
         event.preventDefault();
         void submit('/chatgpt/callback', { redirectUri: redirectUri.trim() });
       }}>
-        <label>OAuth callback из ChatGPT<input type="url" required value={redirectUri}
+        <label className="field">OAuth callback из ChatGPT<input type="url" required value={redirectUri}
           onChange={event => setRedirectUri(event.target.value)} /></label>
         <button className="button secondary" disabled={busy || saving || redirectUri === status.redirectUri}>Сохранить callback</button>
       </form>}

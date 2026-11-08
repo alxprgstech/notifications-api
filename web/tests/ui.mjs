@@ -163,7 +163,7 @@ try {
   const devices = [{ id: 'phone', name: 'Мой Android', revoked: false }];
   const fixtures = {
     session: { actor: { kind: 'web' }, csrfToken: fixtureToken },
-    chatgpt: { url: origin + '/chatgpt/mcp', clientId: null, redirectUri: null },
+    chatgpt: { url: 'https://notify.alxprgs.tech/chatgpt/mcp', clientId: null, redirectUri: null },
     sources, devices,
     agents: [{ id: 'agent1', sourceId: 'fixture', name: 'Агент разработки', capabilities: ['text_tasks', 'realtime_audio'],
       revoked: false, online: true, lastSeenAt: now, sessions: [{ id: 'task1', name: 'Сборка' }] }],
@@ -417,6 +417,10 @@ try {
   await shot('history-mobile');
   await button('Открыть меню').click();
   await menu.getByRole('button', { name: 'Интеграции' }).click();
+  const mcpAddress = page.getByRole('region', { name: 'ChatGPT' }).getByLabel('Адрес MCP');
+  assert.equal(await mcpAddress.inputValue(), fixtures.chatgpt.url);
+  assert.ok(await mcpAddress.evaluate(input => input.clientHeight >= 42 && input.scrollWidth <= input.clientWidth),
+    'The complete MCP address should fit in the styled field on mobile');
   await noOverflow('Mobile integrations');
   await shot('integrations-mobile');
   await button('Открыть меню').click();

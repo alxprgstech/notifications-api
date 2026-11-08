@@ -242,6 +242,9 @@ kbd { border: 1px solid var(--line); border-radius: 5px; background: var(--surfa
 .notice .button { margin-top: 8px; }
 .entity-list { display: grid; gap: 14px; }
 .entity-card { padding: 18px; }
+.chatgpt-panel { display: grid; gap: 14px; margin-top: 14px; }
+.chatgpt-panel header p { margin-top: 4px; }
+.chatgpt-panel .top-actions { flex-wrap: wrap; }
 .entity-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .entity-main { flex: 1 1 140px; overflow-wrap: anywhere; }
 .entity-main code { font-size: .75rem; color: var(--muted); }
