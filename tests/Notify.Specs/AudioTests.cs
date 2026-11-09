@@ -53,6 +53,77 @@ public sealed class AudioTests
     }
 
     [Fact]
+    public async Task TextVoiceUsesServerSileroAndExplicitWavRequiresTranscript()
+    {
+        using var app = new AppFactory { UseSpeechStub = true };
+        var (source, _) = app.Integration(scopes: ["notify:send"]);
+        using (source)
+        {
+            var expires = DateTimeOffset.UtcNow.AddHours(1).ToString("O");
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/notifications")
+            {
+                Content = JsonContent.Create(new { kind = "voice", title = "Text voice", body = "", expiresAt = expires, voiceText = "Проверка синтеза" }),
+            };
+            request.Headers.Add("Idempotency-Key", "text-voice-1");
+            using var response = await source.SendAsync(request);
+            var text = await response.Content.ReadAsStringAsync();
+            Assert.True(response.IsSuccessStatusCode, text);
+            using var document = JsonDocument.Parse(text);
+            var voice = document.RootElement.GetProperty("content").GetProperty("voice");
+            Assert.Equal("Проверка синтеза", voice.GetProperty("transcript").GetString());
+            Assert.Contains("Проверка синтеза", app.Speech.Synthesized);
+            Assert.True((await source.GetAsync("/api/v1/audio/" + voice.GetProperty("audioId").GetString())).IsSuccessStatusCode);
+
+            var upload = await Upload(source, Wav(300));
+            using var missing = new HttpRequestMessage(HttpMethod.Post, "/api/v1/notifications")
+            {
+                Content = JsonContent.Create(new { kind = "voice", title = "No transcript", body = "", expiresAt = expires, voiceUpload = new { uploadId = upload.GetProperty("uploadId").GetString() } }),
+            };
+            missing.Headers.Add("Idempotency-Key", "wav-no-transcript");
+            Assert.Equal(HttpStatusCode.BadRequest, (await source.SendAsync(missing)).StatusCode);
+
+            var second = await Upload(source, Wav(300));
+            using var withText = new HttpRequestMessage(HttpMethod.Post, "/api/v1/notifications")
+            {
+                Content = JsonContent.Create(new { kind = "voice", title = "With transcript", body = "", expiresAt = expires, voiceUpload = new { uploadId = second.GetProperty("uploadId").GetString() }, voiceTranscript = "Точный текст" }),
+            };
+            withText.Headers.Add("Idempotency-Key", "wav-with-transcript");
+            using var accepted = await source.SendAsync(withText);
+            Assert.True(accepted.IsSuccessStatusCode, await accepted.Content.ReadAsStringAsync());
+        }
+    }
+
+    [Fact]
+    public async Task DeviceVoiceMessageGetsLocalTranscript()
+    {
+        using var app = new AppFactory { UseSpeechStub = true };
+        var (sourceClient, source) = app.Integration(scopes: ["notify:send", "requests:read", "agents:connect"]);
+        var (phoneClient, phone, key) = app.Device();
+        using (sourceClient) using (phoneClient) using (key)
+        {
+            RegisterAgent(app, source.Id);
+            var expires = DateTimeOffset.UtcNow.AddHours(1).ToString("O");
+            using var notificationRequest = new HttpRequestMessage(HttpMethod.Post, "/api/v1/notifications")
+            {
+                Content = JsonContent.Create(new { kind = "voice", title = "Voice target", body = "", expiresAt = expires, voiceText = "Целевое сообщение" }),
+            };
+            notificationRequest.Headers.Add("Idempotency-Key", "voice-target-1");
+            using var notificationResponse = await sourceClient.SendAsync(notificationRequest);
+            notificationResponse.EnsureSuccessStatusCode();
+            using var notification = JsonDocument.Parse(await notificationResponse.Content.ReadAsStringAsync());
+            var target = notification.RootElement.GetProperty("id").GetString();
+            var upload = await Upload(phoneClient, Wav(300));
+            using var sent = await phoneClient.PostAsJsonAsync("/api/v1/voice-messages", new { uploadId = upload.GetProperty("uploadId").GetString(), notificationId = target });
+            var body = await sent.Content.ReadAsStringAsync();
+            Assert.True(sent.IsSuccessStatusCode, body);
+            using var created = JsonDocument.Parse(body);
+            var status = JsonDocument.Parse(await phoneClient.GetStringAsync("/api/v1/voice-messages/" + created.RootElement.GetProperty("id").GetString())).RootElement;
+            Assert.Equal("Проверь сборку", status.GetProperty("transcript").GetString());
+            Assert.Equal("complete", status.GetProperty("transcriptionStatus").GetString());
+        }
+    }
+
+    [Fact]
     public async Task WavValidationRejectsWrongParametersAndAcceptsPcm16Mono16Khz()
     {
         using var app = new AppFactory(); var (source, _) = app.Integration();
@@ -98,14 +169,14 @@ public sealed class AudioTests
         {
             var svc = app.Services.GetRequiredService<NotificationService>();
             var standardWav = Wav(1000); var standardUpload = await Upload(source, standardWav);
-            var standard = svc.Create(sourceActor, new CreateNotification("voice", "Voice note", "Listen", ExpiresAt: DateTimeOffset.UtcNow.AddHours(1), VoiceUpload: new VoiceInput(standardUpload.GetProperty("uploadId").GetString()!)), Wire.Secret());
+            var standard = svc.Create(sourceActor, new CreateNotification("voice", "Voice note", "Listen", ExpiresAt: DateTimeOffset.UtcNow.AddHours(1), VoiceUpload: new VoiceInput(standardUpload.GetProperty("uploadId").GetString()!), VoiceTranscript: "Standard voice transcript"), Wire.Secret());
             Assert.NotNull(standard.Content.Voice); Assert.Equal(standard.Content.ExpiresAt!.Value.ToUnixTimeMilliseconds(), standard.Content.Voice!.ExpiresAt);
             var audioId = standard.Content.Voice.AudioId;
             using var bytes = await phoneClient.GetAsync("/api/v1/audio/" + audioId); bytes.EnsureSuccessStatusCode(); Assert.Equal(standardWav, await bytes.Content.ReadAsByteArrayAsync());
             Assert.Equal(HttpStatusCode.NotFound, (await otherSource.GetAsync("/api/v1/audio/" + audioId)).StatusCode);
             Assert.Equal(HttpStatusCode.NotFound, (await phoneClient.GetAsync("/api/v1/audio/not-an-id")).StatusCode);
             var elevatedWav = Wav(1000); var elevatedUpload = await Upload(source, elevatedWav);
-            var elevated = svc.Create(sourceActor, new CreateNotification("voice", "Secret note", "Listen privately", "elevated", DateTimeOffset.UtcNow.AddHours(1), VoiceUpload: new VoiceInput(elevatedUpload.GetProperty("uploadId").GetString()!)), Wire.Secret());
+            var elevated = svc.Create(sourceActor, new CreateNotification("voice", "Secret note", "Listen privately", "elevated", DateTimeOffset.UtcNow.AddHours(1), VoiceUpload: new VoiceInput(elevatedUpload.GetProperty("uploadId").GetString()!), VoiceTranscript: "Elevated voice transcript"), Wire.Secret());
             var secretId = elevated.Content.Voice!.AudioId;
             Assert.Equal(HttpStatusCode.Forbidden, (await phoneClient.GetAsync("/api/v1/audio/" + secretId)).StatusCode);
             var challenge = svc.AudioChallenge(phone, elevated.Id);
@@ -131,9 +202,9 @@ public sealed class AudioTests
             app.Services.GetRequiredService<Database>().Run((c, t) => { var asset = Get<AudioAsset>(c, t, "audio", uploadId)!; Put(c, t, "audio", uploadId, asset with { ExpiresAt = Wire.Now - 1 }); return 0; });
             svc.Cleanup(); Assert.Null(audio.Asset(uploadId)); Assert.False(File.Exists(AudioService.PartPath(settings, uploadId)));
             var standardUpload = await Upload(source, Wav(1000));
-            var note = svc.Create(sourceActor, new CreateNotification("voice", "Expiring", "Short", ExpiresAt: DateTimeOffset.UtcNow.AddSeconds(1.2), VoiceUpload: new VoiceInput(standardUpload.GetProperty("uploadId").GetString()!)), Wire.Secret());
+            var note = svc.Create(sourceActor, new CreateNotification("voice", "Expiring", "Short", ExpiresAt: DateTimeOffset.UtcNow.AddSeconds(1.2), VoiceUpload: new VoiceInput(standardUpload.GetProperty("uploadId").GetString()!), VoiceTranscript: "Standard voice transcript"), Wire.Secret());
             var durableUpload = await Upload(source, Wav(1000));
-            var durable = svc.Create(sourceActor, new CreateNotification("voice", "Durable", "Short", ExpiresAt: DateTimeOffset.UtcNow.AddHours(1), VoiceUpload: new VoiceInput(durableUpload.GetProperty("uploadId").GetString()!)), Wire.Secret());
+            var durable = svc.Create(sourceActor, new CreateNotification("voice", "Durable", "Short", ExpiresAt: DateTimeOffset.UtcNow.AddHours(1), VoiceUpload: new VoiceInput(durableUpload.GetProperty("uploadId").GetString()!), VoiceTranscript: "Durable voice transcript"), Wire.Secret());
             Assert.Equal(403, Assert.Throws<Fault>(() => svc.AudioFile(new Actor("web", AppFactory.Owner, []), durable.Content.Voice!.AudioId, null)).Status);
             await Task.Delay(1400); svc.Cleanup();
             Assert.Null(audio.Asset(note.Content.Voice!.AudioId)); Assert.Equal(404, Assert.Throws<Fault>(() => svc.AudioFile(phone, note.Content.Voice.AudioId, null)).Status);
@@ -154,3 +225,4 @@ public sealed class AudioTests
         }
     }
 }
+

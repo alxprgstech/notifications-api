@@ -50,7 +50,7 @@ class ClientTests(unittest.TestCase):
         with NotifyClient("https://example.com", "test") as client:
             client.http.close()
             client.http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.com")
-            client.send_voice("T", "B", wav=b"RIFF" + b"\0" * 40, expires_at="2030-01-01T00:00:00Z", idempotency_key="voice-key")
+            client.send_voice("T", "B", wav=b"RIFF" + b"\0" * 40, transcript="Synthetic transcript", expires_at="2030-01-01T00:00:00Z", idempotency_key="voice-key")
             self.assertEqual(client.download_audio("b" * 32, grant="grant"), b"wav-bytes")
             self.assertEqual(client.voice_status("c" * 32)["status"], "queued")
             with self.assertRaises(ValueError):
@@ -115,3 +115,4 @@ class AsyncTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

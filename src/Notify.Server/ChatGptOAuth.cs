@@ -58,11 +58,21 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
         builder.Services.AddSingleton<ChatGptVoice>();
         builder.Services.AddSingleton<ChatGptCall>();
         builder.Services.AddSingleton<SileroSpeech>();
+        builder.Services.AddSingleton<SttSpeech>();
+        builder.Services.AddSingleton<VoiceService>();
         builder.Services.AddHttpClient("silero", client =>
         {
-            client.BaseAddress = new Uri(builder.Configuration["ChatGpt:SileroUrl"] ?? "http://silero:8080");
+            client.BaseAddress = new Uri(builder.Configuration["ChatGpt:SileroUrl"] ?? settings.SileroUrl);
             client.Timeout = TimeSpan.FromSeconds(30);
         }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
+        if (!string.IsNullOrWhiteSpace(settings.SttUrl))
+        {
+            builder.Services.AddHttpClient("stt", client =>
+            {
+                client.BaseAddress = new Uri(settings.SttUrl.TrimEnd('/') + "/");
+                client.Timeout = TimeSpan.FromSeconds(30);
+            }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
+        }
 
         builder.Services.AddOpenIddict()
             .AddCore(options => options.UseEntityFrameworkCore().UseDbContext<ChatGptDb>())
@@ -457,7 +467,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
     private static string? ToolScope(string name) => name switch
     {
         "send_notification" or "send_voice" => "notify:send",
-        "start_call" => ChatGptCall.Scope,
+        "start_call" or "start_conversation" or "get_call_transcript" or "speak_call" => ChatGptCall.Scope,
         "request_confirmation" or "request_form" => "requests:create",
         "get_request" or "wait_for_response" => "requests:read",
         "cancel_request" => "requests:cancel",
@@ -478,7 +488,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
                     NextCursor = result.NextCursor,
                     Tools = isChatGpt
                         ? result.Tools.Where(tool => ToolScope(tool.Name) != null).Select(tool => DescribeOAuth(tool, managed)).ToArray()
-                        : result.Tools.Where(tool => tool.Name is not ("send_voice" or "start_call")).ToArray()
+                        : result.Tools.Where(tool => tool.Name is not ("send_voice" or "start_call" or "start_conversation" or "get_call_transcript" or "speak_call")).ToArray()
                 };
             });
             filters.AddCallToolFilter(next => (context, ct) =>
@@ -486,7 +496,7 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
                 var name = context.Params?.Name;
                 var http = context.Services?.GetService<IHttpContextAccessor>()?.HttpContext;
                 if (http?.Request.Path != McpPath)
-                    return name is "send_voice" or "start_call" ? ValueTask.FromResult(ToolError("unknown_tool")) : next(context, ct);
+                    return name is "send_voice" or "start_call" or "start_conversation" or "get_call_transcript" or "speak_call" ? ValueTask.FromResult(ToolError("unknown_tool")) : next(context, ct);
                 var (actor, managed) = http.RequestServices.GetRequiredService<ChatGptOAuth>().GetAccess(http.User);
                 if (actor == null) return ValueTask.FromResult(ToolError("unauthenticated"));
                 var scope = name == null ? null : ToolScope(name);

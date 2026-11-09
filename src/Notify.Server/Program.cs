@@ -36,8 +36,7 @@ builder.Services.AddSingleton<AgentHub>();
 builder.Services.AddSingleton<AudioService>();
 builder.Services.AddSingleton<CallService>();
 builder.Services.AddSingleton<NotificationService>();
-builder.Services.AddSingleton<SsoClient>();
-builder.Services.AddSingleton<IPushSender, GooglePushSender>();
+builder.Services.AddSingleton<SsoClient>();builder.Services.AddSingleton<IPushSender, GooglePushSender>();
 builder.Services.AddHostedService<DeliveryWorker>();
 builder.Services.AddDataProtection().SetApplicationName("alxprgs-notify-v1");
 builder.Services.AddOptions<Microsoft.AspNetCore.DataProtection.KeyManagement.KeyManagementOptions>().Configure<Settings, ILoggerFactory>((o, s, l) => { var path = Path.Combine(s.DataPath, "keys"); Directory.CreateDirectory(path); o.XmlRepository = new Microsoft.AspNetCore.DataProtection.Repositories.FileSystemXmlRepository(new DirectoryInfo(path), l); });
@@ -53,7 +52,8 @@ var secureCookies = new Uri(settings.PublicUrl).Scheme == "https";
 builder.Services.AddOptions<ForwardedHeadersOptions>().Configure<Settings>((o, config) =>
 {
     if (string.IsNullOrEmpty(config.TrustedProxyNetwork)) return;
-    o.ForwardedHeaders = ForwardedHeaders.XForwardedProto;
+    o.ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedFor;
+    o.ForwardLimit = 1;
     o.KnownProxies.Clear();
     o.KnownIPNetworks.Clear();
     o.KnownIPNetworks.Add(System.Net.IPNetwork.Parse(config.TrustedProxyNetwork));
@@ -125,7 +125,8 @@ app.Use(async (context, next) =>
 app.UseRateLimiter(); app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) }); app.UseAuthentication(); app.UseAuthorization();
 app.Use(async (c, next) =>
 {
-    if (c.Request.Path.StartsWithSegments("/api/v1") && c.User.Identity?.IsAuthenticated == true && c.User.FindFirstValue("notify_kind") == "web" && HttpMethods.IsPost(c.Request.Method))
+    if (c.Request.Path.StartsWithSegments("/api/v1") && c.User.Identity?.IsAuthenticated == true && c.User.FindFirstValue("notify_kind") == "web" &&
+        !HttpMethods.IsGet(c.Request.Method) && !HttpMethods.IsHead(c.Request.Method) && !HttpMethods.IsOptions(c.Request.Method))
     {
         if (c.Request.Headers.Origin != settings.PublicUrl) throw new Fault(403, "invalid_origin");
         try { await c.RequestServices.GetRequiredService<Microsoft.AspNetCore.Antiforgery.IAntiforgery>().ValidateRequestAsync(c); }
@@ -137,10 +138,10 @@ app.MapGet("/health/live", () => new { status = "alive" });
 app.MapGet("/health/ready", () => settings.SsoConfigured && settings.FirebaseCredentials != null && File.Exists(settings.FirebaseCredentials) ? Results.Ok(new { status = "ready" }) : Results.Json(new { status = "configuration_required", sso = settings.SsoConfigured, fcm = settings.FirebaseCredentials != null && File.Exists(settings.FirebaseCredentials) }, statusCode: 503));
 app.MapGet("/api/config", () => new
 {
-    version = "0.5.0", settings.SsoIssuer, settings.AndroidClientId, settings.PublicUrl, ssoConfigured = settings.SsoConfigured,
-    capabilities = new { message = true, confirmation = true, elevated = true, forms = true, voiceMessages = true, calls = true, agents = true },
+    version = "0.6.0", settings.SsoIssuer, settings.AndroidClientId, settings.PublicUrl, ssoConfigured = settings.SsoConfigured,
+    capabilities = new { message = true, confirmation = true, elevated = true, forms = true, voiceMessages = true, voiceText = true, transcription = !string.IsNullOrWhiteSpace(settings.SttUrl), callTranscripts = true, calls = true, agents = true, conversation = !string.IsNullOrWhiteSpace(settings.SttUrl) },
     protocols = new { answer = "alxprgs.notify.answer.v1", form = "alxprgs.notify.form.v1", audio = "alxprgs.notify.audio.v1", agent = AgentHub.Protocol, call = CallService.Protocol },
-    minClientVersion = new { forms = "0.2.0", voiceMessages = "0.3.0", calls = "0.5.0" }
+    minClientVersion = new { forms = "0.2.0", voiceMessages = "0.3.0", calls = "0.5.0", conversation = "0.6.0" }
 });
 app.MapGet("/.well-known/assetlinks.json", () => settings.AndroidSigningFingerprints.Length == 0 ? Results.Json(Array.Empty<object>(), statusCode: 503) : Results.Json(new[] { new { relation = new[] { "delegate_permission/common.handle_all_urls" }, target = new { @namespace = "android_app", package_name = "tech.alxprgs.notify", sha256_cert_fingerprints = settings.AndroidSigningFingerprints } } }));
 app.MapGet("/auth/login", () => settings.SsoConfigured ? Results.Challenge(new AuthenticationProperties { RedirectUri = "/" }, ["sso"]) : Results.Problem(statusCode: 503, title: "SSO not configured"));
@@ -161,7 +162,8 @@ var api = app.MapGroup("/api/v1").RequireAuthorization();
 });
 api.MapGet("/session", (HttpContext c, Microsoft.AspNetCore.Antiforgery.IAntiforgery csrf) => new { actor = Auth.Actor(c), csrfToken = csrf.GetAndStoreTokens(c).RequestToken });
 api.MapPost("/logout", async (HttpContext c) => { if (Auth.Actor(c).Kind != "web") throw new Fault(403, "web_required"); await c.SignOutAsync("web"); return Results.NoContent(); });
-api.MapPost("/notifications", (CreateNotification input, HttpContext c, NotificationService service) => service.Create(Auth.Actor(c), input, c.Request.Headers["Idempotency-Key"].ToString()));
+api.MapPost("/notifications", async (CreateNotification input, HttpContext c, VoiceService voice, CancellationToken ct) =>
+    await voice.CreateAsync(Auth.Actor(c), input, c.Request.Headers["Idempotency-Key"].ToString(), ct));
 api.MapGet("/notifications", (HttpContext c, NotificationService service, long? before, string? beforeId, int? limit) => service.List(Auth.Actor(c), before ?? long.MaxValue, beforeId ?? "~", limit ?? 50));
 api.MapGet("/notifications/{id}", (string id, HttpContext c, NotificationService service) => service.Read(Auth.Actor(c), id));
 api.MapGet("/notifications/{id}/wait", async (string id, int? seconds, HttpContext c, NotificationService service, CancellationToken ct) =>
@@ -185,10 +187,13 @@ api.MapPost("/voice-messages", async (VoiceSend input, HttpContext c, Notificati
 api.MapGet("/voice-messages/{id}", (string id, HttpContext c, NotificationService service) => service.VoiceStatus(Auth.Actor(c), id));
 api.MapDelete("/voice-messages/{id}", (string id, HttpContext c, NotificationService service) => { service.DeleteVoice(Auth.Actor(c), id); return Results.NoContent(); });
 api.MapPost("/calls/challenge", (CallChallengeInput input, HttpContext c, CallService calls) => calls.Challenge(Auth.Actor(c), input));
+api.MapPost("/calls/announce", async (CallPlaybackInput input, HttpContext c, ChatGptCall calls, CancellationToken ct) =>
+    await calls.StartRest(Auth.Actor(c), input.Title, input.Text, input.IdempotencyKey, ct));
 api.MapPost("/calls", async (CallStart input, HttpContext c, CallService calls, CancellationToken ct) => await calls.StartAsync(Auth.Actor(c), input, ct));
 api.MapGet("/calls", (HttpContext c, CallService calls) => calls.History(Auth.Actor(c)));
 api.MapGet("/calls/incoming", (HttpContext c, CallService calls) => calls.Incoming(Auth.Actor(c)));
 api.MapGet("/calls/{id}", (string id, HttpContext c, CallService calls) => calls.State(Auth.Actor(c), id));
+api.MapGet("/calls/{id}/transcript", (string id, HttpContext c, CallService calls) => calls.Transcript(Auth.Actor(c), id));
 api.MapPost("/calls/{id}/challenge", (string id, HttpContext c, CallService calls) => calls.ChallengeIncoming(Auth.Actor(c), id));
 api.MapPost("/calls/{id}/accept", async (string id, CallAcceptInput input, HttpContext c, CallService calls) => await calls.AcceptAsync(Auth.Actor(c), id, input));
 api.MapPost("/calls/{id}/reject", async (string id, HttpContext c, CallService calls) => { await calls.RejectAsync(Auth.Actor(c), id); return Results.NoContent(); });
@@ -322,6 +327,14 @@ public sealed class NotifyTools(NotificationService service, IHttpContextAccesso
         context.HttpContext?.Request.Path == ChatGptOAuth.McpPath
             ? voice.Send(Actor, title, text, expiresAt, idempotencyKey, cancellationToken)
             : throw new Fault(404, "unknown_tool");
+    [McpServerTool, System.ComponentModel.Description("Ring the owner's Android phone for a two-way Russian conversation. The server recognizes the owner's speech locally; call get_call_transcript to read new turns and speak_call to answer. The phone must be accepted manually. Repeat with the same idempotency key to check the same ringing call.")]
+    public Task<string> StartConversation(string title, string idempotencyKey, CancellationToken cancellationToken) =>
+        IsChatGpt ? calls.StartConversation(Actor, title, idempotencyKey, cancellationToken) : throw new Fault(404, "unknown_tool");
+    [McpServerTool, System.ComponentModel.Description("Read the ordered transcript of a ChatGPT conversation call. Audio is never stored; only encrypted text is retained with the call history. partial=true means some speech was not recognized, while received turns remain available.")]
+    public string GetCallTranscript(string callId) => IsChatGpt ? calls.Transcript(Actor, callId) : throw new Fault(404, "unknown_tool");
+    [McpServerTool, System.ComponentModel.Description("Speak one Russian reply into an active conversation call using the server-side Silero. Reuse the same idempotency key on retry. This does not create a new call.")]
+    public string SpeakCall(string callId, string text, string idempotencyKey) =>
+        IsChatGpt ? calls.Speak(Actor, callId, text, idempotencyKey) : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Ring the owner's Android phone. If accepted, read up to 300 characters of Russian text aloud using Silero and hang up. The initial result is a call state, not proof of acceptance or playback. Repeat the same arguments and idempotency key to check status without redialing.")]
     public Task<string> StartCall(string title, string text, string idempotencyKey, CancellationToken cancellationToken) =>
         IsChatGpt ? calls.Start(Actor, title, text, idempotencyKey, cancellationToken) : throw new Fault(404, "unknown_tool");

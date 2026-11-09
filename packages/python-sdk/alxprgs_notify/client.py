@@ -86,9 +86,22 @@ class NotifyClient:
             raise ValueError("WAV must be 44 bytes..10 MiB")
         return _result(self.http.post("/api/v1/audio/uploads", content=wav, headers={"Content-Type": "application/octet-stream"}))
 
-    def send_voice(self, title: str, body: str, *, wav: bytes, expires_at: str, idempotency_key: str, security_level: Literal["standard", "elevated"] = "standard", icon_id: str | None = None, correlation_id: str | None = None) -> Notification:
+    def send_voice(self, title: str, body: str, *, wav: bytes, transcript: str, expires_at: str, idempotency_key: str, security_level: Literal["standard", "elevated"] = "standard", icon_id: str | None = None, correlation_id: str | None = None) -> Notification:
+        if not isinstance(transcript, str) or not transcript.strip() or len(transcript) > 16000:
+            raise ValueError("Explicit WAV requires a non-empty transcript")
         upload = self.upload_audio(wav)
-        return self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceUpload": {"uploadId": upload["uploadId"]}, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
+        return self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceUpload": {"uploadId": upload["uploadId"]}, "voiceTranscript": transcript, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
+
+    def send_voice_text(self, title: str, body: str, *, text: str, expires_at: str, idempotency_key: str, security_level: Literal["standard", "elevated"] = "standard", icon_id: str | None = None, correlation_id: str | None = None) -> Notification:
+        if not isinstance(text, str) or not text.strip() or len(text) > 1000:
+            raise ValueError("Voice text must be 1..1000 characters")
+        return self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceText": text, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
+
+    def announce_call(self, title: str, text: str, *, idempotency_key: str) -> dict[str, Any]:
+        return _result(self.http.post("/api/v1/calls/announce", json={"title": title, "text": text, "idempotencyKey": idempotency_key}))
+
+    def call_transcript(self, call_id: str) -> dict[str, Any]:
+        return _result(self.http.get(f"/api/v1/calls/{_id(call_id)}/transcript"))
 
     def download_audio(self, audio_id: str, *, grant: str | None = None) -> bytes:
         headers = {"X-Notify-Audio-Grant": grant} if grant else {}
@@ -157,9 +170,22 @@ class AsyncNotifyClient:
             raise ValueError("WAV must be 44 bytes..10 MiB")
         return _result(await self.http.post("/api/v1/audio/uploads", content=wav, headers={"Content-Type": "application/octet-stream"}))
 
-    async def send_voice(self, title: str, body: str, *, wav: bytes, expires_at: str, idempotency_key: str, security_level: Literal["standard", "elevated"] = "standard", icon_id: str | None = None, correlation_id: str | None = None) -> Notification:
+    async def send_voice(self, title: str, body: str, *, wav: bytes, transcript: str, expires_at: str, idempotency_key: str, security_level: Literal["standard", "elevated"] = "standard", icon_id: str | None = None, correlation_id: str | None = None) -> Notification:
+        if not isinstance(transcript, str) or not transcript.strip() or len(transcript) > 16000:
+            raise ValueError("Explicit WAV requires a non-empty transcript")
         upload = await self.upload_audio(wav)
-        return await self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceUpload": {"uploadId": upload["uploadId"]}, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
+        return await self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceUpload": {"uploadId": upload["uploadId"]}, "voiceTranscript": transcript, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
+
+    async def send_voice_text(self, title: str, body: str, *, text: str, expires_at: str, idempotency_key: str, security_level: Literal["standard", "elevated"] = "standard", icon_id: str | None = None, correlation_id: str | None = None) -> Notification:
+        if not isinstance(text, str) or not text.strip() or len(text) > 1000:
+            raise ValueError("Voice text must be 1..1000 characters")
+        return await self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceText": text, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
+
+    async def announce_call(self, title: str, text: str, *, idempotency_key: str) -> dict[str, Any]:
+        return _result(await self.http.post("/api/v1/calls/announce", json={"title": title, "text": text, "idempotencyKey": idempotency_key}))
+
+    async def call_transcript(self, call_id: str) -> dict[str, Any]:
+        return _result(await self.http.get(f"/api/v1/calls/{_id(call_id)}/transcript"))
 
     async def download_audio(self, audio_id: str, *, grant: str | None = None) -> bytes:
         headers = {"X-Notify-Audio-Grant": grant} if grant else {}

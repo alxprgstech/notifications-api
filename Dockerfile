@@ -15,15 +15,16 @@ COPY src/ src/
 RUN dotnet publish src/Notify.Server/Notify.Server.csproj --no-restore -c Release -o /out
 COPY --from=web /web/dist/ /out/wwwroot/
 
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.12-noble@sha256:222759b391a1aaf241166672c8f99b2d4ada452e7b5319f3c6e8f265a37b5ad4
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.14-noble@sha256:1a48394b6f29d3a32c79d9edecd4abda0ecbe8776d567dbfc4590ed6979c740c
 WORKDIR /app
 COPY --from=build /out/ ./
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /data && chown 1654:1654 /data && chmod 700 /data
 USER 1654:1654
-ENV ASPNETCORE_HTTP_PORTS=8080 Notify__DataPath=/data DOTNET_gcServer=0
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080 Notify__DataPath=/data DOTNET_gcServer=0
 # A single low-traffic process trading a little startup JIT time for a smaller
 # persistent JIT code heap: no tier0/tier1 duplicates in memfd.
 ENV DOTNET_TieredCompilation=0

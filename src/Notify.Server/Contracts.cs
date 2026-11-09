@@ -23,14 +23,14 @@ public sealed record FormField(string Id, string Label, string Type, bool Requir
 public sealed record FormSpec(List<FormField> Fields);
 public sealed record FormValues(Dictionary<string, JsonElement> Values);
 public sealed record FormAnswer(Dictionary<string, JsonElement> Values);
-public sealed record VoiceAttachment(string AudioId, int DurationMs, int SizeBytes, long ExpiresAt);
+public sealed record VoiceAttachment(string AudioId, int DurationMs, int SizeBytes, long ExpiresAt, string? Transcript = null, bool TranscriptProtected = false);
 public sealed record VoiceInput(string UploadId);
 public sealed record VoiceSend(string UploadId, string? NotificationId = null, DateTimeOffset? ExpiresAt = null);
 public sealed record AudioGrantInput(string ChallengeId, string Signature);
 public sealed record AudioAsset(string Id, string SourceId, string? DeviceId, string Status, int SizeBytes, int DurationMs, long CreatedAt, long ExpiresAt, string? NotificationId = null);
 public sealed record AudioGrant(string Id, string AudioId, string DeviceId, long ExpiresAt, bool Used = false);
-public sealed record VoiceMessage(string Id, string SourceId, string DeviceId, string? NotificationId, string AudioId, int DurationMs, int SizeBytes, long CreatedAt, long ExpiresAt);
-public sealed record CreateNotification(string Kind, string Title, string Body, string SecurityLevel = "standard", DateTimeOffset? ExpiresAt = null, bool AllowCustom = true, string? IconId = null, string? CorrelationId = null, FormSpec? Form = null, VoiceInput? VoiceUpload = null, VoiceAttachment? Voice = null);
+public sealed record VoiceMessage(string Id, string SourceId, string DeviceId, string? NotificationId, string AudioId, int DurationMs, int SizeBytes, long CreatedAt, long ExpiresAt, string? Transcript = null, string? TranscriptionStatus = null, string? TranscriptionError = null);
+public sealed record CreateNotification(string Kind, string Title, string Body, string SecurityLevel = "standard", DateTimeOffset? ExpiresAt = null, bool AllowCustom = true, string? IconId = null, string? CorrelationId = null, FormSpec? Form = null, VoiceInput? VoiceUpload = null, VoiceAttachment? Voice = null, string? VoiceText = null, string? VoiceTranscript = null);
 public sealed record Answer(string Decision, string? Text = null);
 public sealed record SubmitAnswer(Answer? Answer = null, string? ChallengeId = null, string? Signature = null, FormValues? Form = null);
 public sealed record Notification(string Id, string SourceId, CreateNotification Content, long CreatedAt, string Status, Answer? Answer = null, long? AnsweredAt = null, string? ManagementId = null, bool PreviewOnly = false, FormAnswer? FormAnswer = null);
@@ -44,12 +44,15 @@ public sealed record Enrollment(string Id, EnrollDevice Device, string Owner, lo
 public sealed record StepUpState(string Id, string Kind, string TargetId, string Owner, string PayloadHash, string State, string Nonce, string Verifier, long ExpiresAt);
 public sealed record Agent(string Id, string SourceId, string Name, string[] Capabilities, long CreatedAt, long? LastSeenAt = null, bool Revoked = false, string[]? CallProtocols = null, string? CallProtocol = null);
 public sealed record AgentSession(string Id, string Name);
-public sealed record CallStart(string SourceId, string? SessionId = null, string SecurityLevel = "standard", string? ChallengeId = null, string? Signature = null);
+public sealed record CallStart(string SourceId, string? SessionId = null, string SecurityLevel = "standard", string? ChallengeId = null, string? Signature = null, string Mode = "one_shot");
+public sealed record CallPlaybackInput(string IdempotencyKey, string Title, string Text, string? IconId = null);
 public sealed record CallChallengeInput(string SourceId, string? SessionId = null, string SecurityLevel = "standard");
 public sealed record CallAcceptInput(string? ChallengeId = null, string? Signature = null);
 public sealed record CallChallenge(string Id, string DeviceId, string Payload, long ExpiresAt);
 public sealed record CallChallengeProof(string Protocol, string ChallengeId, string DeviceId, string Direction, string Action, string SourceId, string AgentId, string? SessionId, string? CallId, string? InviteId, string SecurityLevel, string Nonce, long ExpiresAt);
-public sealed record CallRecord(string Id, string SourceId, string AgentId, string? DeviceId, string? SessionId, string SecurityLevel, long StartedAt, long EndedAt, string Status, string? Reason, int DurationMs, string Direction = "outgoing");
+public sealed record CallTurn(string Id, string Speaker, string Text, long At, bool Final = true, string? Status = null, string? Error = null);
+public sealed record CallTranscript(string CallId, string ProtectedTurns, bool Partial, string? Error, long UpdatedAt);
+public sealed record CallRecord(string Id, string SourceId, string AgentId, string? DeviceId, string? SessionId, string SecurityLevel, long StartedAt, long EndedAt, string Status, string? Reason, int DurationMs, string Direction = "outgoing", bool HasTranscript = false, bool TranscriptPartial = false);
 public sealed record AgentCommand(string Id, string AgentId, string SourceId, string Type, string Payload, long CreatedAt, long ExpiresAt, string Status = "queued", int Attempts = 0, long? AckedAt = null, string? CorrelationId = null, string? SessionId = null);
 public sealed record ManagementInput(string Action, string? Name = null, string? TargetId = null, string[]? Scopes = null, string? Preview = null, string? IconId = null, string? WebhookUrl = null, string[]? Capabilities = null, long? ExpectedRevision = null);
 public sealed record Management(string Id, string SessionId, ManagementInput Input, long ExpiresAt, string Status = "pending", string? ProtectedResult = null);
@@ -75,6 +78,10 @@ public sealed class Settings
     public string WebClientId { get; init; } = "notify-web";
     public string WebClientSecret { get; init; } = "";
     public string AndroidClientId { get; init; } = "notify-android";
+    public string SileroUrl { get; init; } = "http://silero:8080";
+    public string SttUrl { get; init; } = "";
+    public int ConversationUtteranceSeconds { get; init; } = 15;
+    public int ConversationSilenceMilliseconds { get; init; } = 700;
     public string? FirebaseCredentials { get; init; }
     public string? TrustedProxyNetwork { get; init; }
     public string[] WebhookHosts { get; init; } = [];
@@ -109,5 +116,7 @@ public sealed class Settings
         if (AgentHeartbeatSeconds is < 1 or > 60 || AgentOfflineSeconds < AgentHeartbeatSeconds * 2 || AgentOfflineSeconds > 600 || AgentSendTimeoutSeconds is < 1 or > 30) throw new InvalidOperationException("Invalid agent heartbeat/offline limits");
         if (AudioQuotaBytes is < 1L * 1024 * 1024 or > 50L * 1024 * 1024 * 1024 || AudioUploadMinutes is < 1 or > 60 || AudioMessageTtlDays is < 1 or > 30) throw new InvalidOperationException("Invalid audio quota/upload/retention limits");
         if (CallRingSeconds is < 1 or > 120 || CallMaxMinutes is < 1 or > 120 || CallMediaConnectSeconds is < 1 or > 60 || CallQueueFrames is < 1 or > 200) throw new InvalidOperationException("Invalid call limits");
+        if (ConversationUtteranceSeconds is < 3 or > 30 || ConversationSilenceMilliseconds is < 300 or > 2000) throw new InvalidOperationException("Invalid conversation limits");
+        if (!string.IsNullOrEmpty(SttUrl) && (!Uri.TryCreate(SttUrl, UriKind.Absolute, out var stt) || stt.Scheme is not ("http" or "https") || stt.UserInfo.Length != 0 || stt.Query.Length != 0 || stt.Fragment.Length != 0)) throw new InvalidOperationException("SttUrl must be an HTTP(S) base URL without credentials or query");
     }
 }

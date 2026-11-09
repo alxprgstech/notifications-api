@@ -31,6 +31,8 @@ public sealed class AppFactory : WebApplicationFactory<Program>
     public int CallMediaConnectSeconds { get; set; } = 10;
     public int CallQueueFrames { get; set; } = 100;
     public IPushSender? PushSender { get; set; }
+    public bool UseSpeechStub { get; set; }
+    public SpeechStubFactory Speech { get; } = new();
     public static readonly string Owner = "67560410-fdaf-427f-bf96-76c3cbba266b";
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -41,11 +43,13 @@ public sealed class AppFactory : WebApplicationFactory<Program>
             ["Notify:PublicUrl"] = "https://localhost",
             ["Notify:OwnerSub"] = Owner,
             ["Notify:WebClientSecret"] = "synthetic-client-secret-not-a-real-credential",
-            ["Notify:SsoIssuer"] = Issuer
+            ["Notify:SsoIssuer"] = Issuer,
+            ["Notify:SttUrl"] = UseSpeechStub ? "http://stt:8080" : ""
         }));
         builder.ConfigureServices(services =>
         {
-            services.RemoveAll<Settings>(); services.AddSingleton(new Settings { DataPath = Root, PublicUrl = "https://localhost", OwnerSub = Owner, WebClientSecret = "synthetic-client-secret-not-a-real-credential", SsoIssuer = Issuer, TrustedProxyNetwork = TrustedProxyNetwork, WebhookHosts = ["fixture.test"], SourceDailyLimit = DailyLimit, AgentHeartbeatSeconds = AgentHeartbeatSeconds, AgentOfflineSeconds = AgentOfflineSeconds, AgentSendTimeoutSeconds = AgentSendTimeoutSeconds, AudioQuotaBytes = AudioQuotaBytes, AudioMessageTtlDays = AudioMessageTtlDays, CallRingSeconds = CallRingSeconds, CallMediaConnectSeconds = CallMediaConnectSeconds, CallQueueFrames = CallQueueFrames });
+            services.RemoveAll<Settings>(); services.AddSingleton(new Settings { DataPath = Root, PublicUrl = "https://localhost", OwnerSub = Owner, WebClientSecret = "synthetic-client-secret-not-a-real-credential", SsoIssuer = Issuer, TrustedProxyNetwork = TrustedProxyNetwork, WebhookHosts = ["fixture.test"], SourceDailyLimit = DailyLimit, AgentHeartbeatSeconds = AgentHeartbeatSeconds, AgentOfflineSeconds = AgentOfflineSeconds, AgentSendTimeoutSeconds = AgentSendTimeoutSeconds, AudioQuotaBytes = AudioQuotaBytes, AudioMessageTtlDays = AudioMessageTtlDays, CallRingSeconds = CallRingSeconds, CallMediaConnectSeconds = CallMediaConnectSeconds, CallQueueFrames = CallQueueFrames, SttUrl = UseSpeechStub ? "http://stt:8080" : "", SileroUrl = "http://silero:8080" });
+            if (UseSpeechStub) { services.RemoveAll<IHttpClientFactory>(); services.AddSingleton<IHttpClientFactory>(Speech); }
             foreach (var registration in services.Where(d => d.ImplementationType == typeof(DeliveryWorker)).ToList()) services.Remove(registration);
             if (PushSender != null) { services.RemoveAll<IPushSender>(); services.AddSingleton(PushSender); }
             if (WebhookReceiver != null) services.AddHttpClient("webhook").ConfigurePrimaryHttpMessageHandler(() => new FixtureForwarder(WebhookReceiver));

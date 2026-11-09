@@ -234,6 +234,19 @@ class AgentConnector:
             if self._call_handler is not None and isinstance(call_id, str):
                 task = asyncio.create_task(self._invoke_call(self._call_handler.on_ended(call_id, str(reason or "ended"))))
                 self._call_tasks.add(task); task.add_done_callback(self._call_tasks.discard)
+        elif kind in ("dialog.user", "call.interrupted", "call.speech_error"):
+            payload = event.get("payload") or {}
+            if not isinstance(payload, dict):
+                return
+            handler_name = {
+                "dialog.user": "on_user_text",
+                "call.interrupted": "on_interrupted",
+                "call.speech_error": "on_speech_error",
+            }[kind]
+            handler = getattr(self._call_handler, handler_name, None)
+            if handler is not None:
+                task = asyncio.create_task(self._invoke_call(handler(payload)))
+                self._call_tasks.add(task); task.add_done_callback(self._call_tasks.discard)
 
     def _resolve_call(self, call_id: str, payload: dict[str, Any]) -> None:
         self._last_calls[call_id] = payload
@@ -287,12 +300,14 @@ class AgentConnector:
         async with AsyncNotifyClient(self._base, self._token) as client:
             return await client.upload_icon(data)
 
-    async def dial_call(self, session_id: str | None = None, security_level: str = "standard", title: str | None = None, timeout: float = 10, *, icon_id: str | None = None) -> dict[str, Any]:
+    async def dial_call(self, session_id: str | None = None, security_level: str = "standard", title: str | None = None, timeout: float = 10, *, icon_id: str | None = None, mode: str = "one_shot") -> dict[str, Any]:
         """Ask the server to ring the owner. Does not open a microphone."""
         if self._call_protocol != CALL_PROTOCOL:
             raise NotifyCallError("call_protocol_unsupported")
         if security_level not in ("standard", "elevated"):
             raise ValueError("security_level must be standard or elevated")
+        if mode not in ("one_shot", "conversation"):
+            raise ValueError("mode must be one_shot or conversation")
         if session_id is not None and (not isinstance(session_id, str) or len(session_id) > 64):
             raise ValueError("Invalid session id")
         if title is not None and len(title) > 160:
@@ -303,7 +318,7 @@ class AgentConnector:
             raise RuntimeError("agent is not connected")
         request_id = _event(); loop = asyncio.get_running_loop(); waiter = loop.create_future(); self._dial_waiters[request_id] = waiter
         try:
-            payload: dict[str, Any] = {"securityLevel": security_level}
+            payload: dict[str, Any] = {"securityLevel": security_level, "mode": mode}
             if session_id is not None: payload["sessionId"] = session_id
             if title is not None: payload["title"] = title
             if icon_id is not None: payload["iconId"] = icon_id
@@ -343,6 +358,19 @@ class AgentConnector:
         if generation < 0:
             raise ValueError("generation must be non-negative")
         await self._send_call("call.interrupt", {"callId": call_id, "generation": generation})
+
+    async def say(self, call_id: str, text: str, *, turn_id: str | None = None) -> None:
+        """Speak one agent reply through Notify's server-side Silero."""
+        if len(call_id) != 32:
+            raise ValueError("Invalid call id")
+        if not isinstance(text, str) or not text.strip() or len(text) > 1000:
+            raise ValueError("Reply text must be 1..1000 characters")
+        payload: dict[str, Any] = {"callId": call_id, "text": text}
+        if turn_id is not None:
+            if len(turn_id) != 32:
+                raise ValueError("Invalid turn id")
+            payload["turnId"] = turn_id
+        await self._send_call("call.say", payload)
 
     @asynccontextmanager
     async def call_audio(self, call_id: str):

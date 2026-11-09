@@ -212,7 +212,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
                 case "ack":
                     Ack(connection, Text(frame, "commandEventId", 64));
                     break;
-                case "call.dial" or "call.accept" or "call.reject" or "call.end" or "call.interrupt":
+                case "call.dial" or "call.accept" or "call.reject" or "call.end" or "call.interrupt" or "call.say":
                     if (ControlEvent is { } control) await control(connection.Agent, frame);
                     break;
                 default:

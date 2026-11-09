@@ -419,7 +419,10 @@ internal static class OpenApiDocs
             Создаёт событие от имени источника, определённого токеном. `kind=message` — информационное сообщение (`notify:send`).
             `confirmation` — решение да/нет/свой вариант (`requests:create`), `securityLevel=standard|elevated`, обязательный будущий `expiresAt` (до 30 дней).
             `form` — структурированный ответ и обязательный `form.fields` (`requests:create`).
-            `voice` — голосовое вложение и обязательные `voiceUpload.uploadId` + `expiresAt` (`notify:send`).
+            `voice` — голосовое вложение. Для нового голосового сообщения используйте один из двух явных путей:
+            `voiceText` (1–1 000 символов; сервер синтезирует WAV через внутренний Silero) либо
+            `voiceUpload.uploadId` вместе с обязательным непустым `voiceTranscript` (точный текст произнесённого WAV).
+            Старые записи без текста остаются читаемыми; новый WAV без расшифровки отклоняется до доставки.
             Повтор с тем же `Idempotency-Key` и тем же содержимым возвращает прежнее событие; изменённое содержимое — 409.
             Сохраняйте ключ между сетевыми повторами. Ответ — полная запись, не preview.
             """,
@@ -597,13 +600,36 @@ internal static class OpenApiDocs
             """{"sourceId":"abcdef0123456789abcdef0123456789","sessionId":"task-1","securityLevel":"elevated"}"""));
 
         Add("POST", "/api/v1/calls", new("startCall", "Звонки", "Начать исходящий звонок",
-            "Создаёт исходящий звонок владельца агенту. Одновременно допускается один звонок; второй получает 409 `busy`. Elevated требует `challengeId` и `signature`; для standard эти поля должны отсутствовать. Сервер отправляет агенту `call.invite`; звонок переходит в `connecting` после `call.accept` агента. Медиа — отдельный WebSocket.",
+            "Создаёт исходящий звонок владельца агенту. Одновременно допускается один звонок; второй получает 409 `busy`. Elevated требует `challengeId` и `signature`; для standard эти поля должны отсутствовать. `mode=one_shot` — обычный живой звонок с ретрансляцией медиа; `mode=conversation` — разговор без кнопки «Говорить»: сервер распознаёт русскую речь локально, передаёт реплики только в выбранную `sessionId` агента и озвучивает ответ серверным Silero. Conversation требует настроенный STT (`503 stt_unavailable`). Сервер отправляет агенту `call.invite`; звонок переходит в `connecting` после `call.accept` агента. Медиа — отдельный WebSocket.",
             ApiAuth.Bearer, [Ok<CallViewResponse>("Звонок создан и приглашение отправлено агенту."), .. callErrors],
             RequestBodyKind.Json, "Параметры исходящего звонка.",
-            """{"sourceId":"abcdef0123456789abcdef0123456789","sessionId":"task-1","securityLevel":"standard"}"""));
+            """{"sourceId":"abcdef0123456789abcdef0123456789","sessionId":"task-1","securityLevel":"standard","mode":"conversation"}"""));
+
+        Add("POST", "/api/v1/calls/announce", new("announceCall", "Звонки", "Позвонить с серверной озвучкой текста",
+            "Создаёт входящий звонок владельцу и после ручного принятия проигрывает текст, синтезированный серверным Silero. Доступно интеграции с `calls:start` (ChatGPT) или интеграции с `agents:connect`, у которой зарегистрирован online-агент с `realtime_audio` и общим call v2. Это режим одной фразы: после последнего кадра сервер завершает звонок с `playback_sent`. Повтор с тем же `IdempotencyKey` возвращает тот же звонок без повторного набора. При отказе Silero звонок не создаётся.",
+            ApiAuth.Bearer, [
+                Ok<CallViewResponse>("Звонок создан.", """{"id":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","inviteId":"ffffffffffffffffffffffffffffffff","direction":"incoming","status":"ringing","reason":null,"sourceId":"abcdef0123456789abcdef0123456789","agentId":"abcdef0123456789abcdef0123456789","agentName":"DeepSeek Harness","sessionId":null,"securityLevel":"standard","deviceId":null,"startedAt":1767225600000,"activeAt":null,"endedAt":null,"title":"Notify","iconId":null,"mode":"playback","hasTranscript":true,"expiresAt":1767225645000}"""),
+                Error(400, "`invalid_call` (текст/заголовок/ключ) или `idempotency_conflict`.", """{"code":"invalid_call"}"""),
+                Error(403, "Нет `calls:start`/`agents:connect` (`insufficient_scope`).", """{"code":"insufficient_scope"}"""),
+                Error(404, "Агент не зарегистрирован (`agent_not_registered`).", """{"code":"agent_not_registered"}"""),
+                Error(409, "`busy`, `agent_offline`, `agent_unsupported` или `call_protocol_unsupported`.", """{"code":"busy"}"""),
+                Error(503, "`silero_unavailable` или `silero_timeout`; звонок не создан, текст можно отправить обычным уведомлением.", """{"code":"silero_unavailable"}"""),
+                Unauthorized, RateLimited, InternalError],
+            RequestBodyKind.Json, "Короткая русская фраза и стабильный ключ повтора.",
+            """{"idempotencyKey":"announce-2026-11-09-1","title":"Notify","text":"Проверка завершена."}"""));
+
+        Add("GET", "/api/v1/calls/{id}/transcript", new("getCallTranscript", "Звонки", "Расшифровка разговора",
+            "Возвращает упорядоченные реплики участников (`user` — владелец, `agent` — выбранный чат/агент). Доступно участнику звонка: устройству, владельцу-веб-сессии или интеграции-источнику. Текст хранится в SQLite только в защищённом виде и удаляется вместе с 30-дневной историей звонка. `partial=true` означает, что распознавание части реплик завершилось ошибкой; уже полученные реплики остаются доступны, а `error` содержит код. Аудио звонка не сохраняется.",
+            ApiAuth.BearerOrWeb, [
+                Ok<CallTranscriptResponse>("Расшифровка звонка.", """{"callId":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","turns":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","speaker":"user","text":"Проверь сборку.","at":1767225605000,"final":true,"status":"complete","error":null},{"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","speaker":"agent","text":"Сборка прошла.","at":1767225609000,"final":true,"status":"complete","error":null}],"partial":false,"error":null,"updatedAt":1767225609000}"""),
+                Unauthorized,
+                Error(403, "Состояние звонка недоступно (`call_not_found`).", """{"code":"call_not_found"}"""),
+                Error(404, "Звонок или расшифровка не найдены (`transcript_not_found`).", """{"code":"transcript_not_found"}"""),
+                RateLimited, InternalError],
+            Parameters: new() { ["id"] = "Id звонка." }));
 
         Add("GET", "/api/v1/calls", new("listCalls", "Звонки", "История звонков",
-            "Только владелец (`web`/`device`). Возвращает до 100 последних записей с метаданными: direction, deviceId, reason, durationMs. Аудио и расшифровок нет.",
+            "Только владелец (`web`/`device`). Возвращает до 100 последних записей с метаданными: direction, deviceId, reason, durationMs, mode, hasTranscript. Аудио не сохраняется; текст доступен отдельным `GET /calls/{id}/transcript` и удаляется вместе с 30-дневной записью.",
             ApiAuth.BearerOrWeb, [
                 OkArray<CallRecord>("История звонков.", """[{"id":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","sourceId":"abcdef0123456789abcdef0123456789","agentId":"ffffffffffffffffffffffffffffffff","deviceId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sessionId":"task-1","securityLevel":"standard","startedAt":1767225600000,"endedAt":1767225660000,"status":"ended","reason":"ended","durationMs":60000,"direction":"outgoing"}]"""),
                 Unauthorized,
@@ -611,7 +637,7 @@ internal static class OpenApiDocs
                 RateLimited, InternalError]));
 
         Add("GET", "/api/v1/calls/incoming", new("getIncomingCall", "Звонки", "Текущий входящий звонок",
-            "Только устройство. Возвращает актуальный входящий звонок в состоянии `ringing`; если приглашения нет — 404. Приглашение не включает микрофон: приложение показывает карточку и ждёт явного accept. Этот опрос — резервный путь, если FCM/full-screen intent недоступны.",
+            "Только устройство. Возвращает актуальный входящий звонок в состоянии `ringing`; если приглашения нет — 404. `mode` показывает, будет ли это одна фраза (`one_shot`/`playback`) или разговор (`conversation`). Приглашение не включает микрофон: приложение показывает карточку и ждёт явного accept. Этот опрос — резервный путь, если FCM/full-screen intent недоступны.",
             ApiAuth.Bearer, [
                 Ok<CallViewResponse>("Есть входящий ringing-звонок."),
                 Unauthorized,

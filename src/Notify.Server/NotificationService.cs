@@ -7,7 +7,7 @@ using static Notify.Database;
 
 namespace Notify;
 
-public sealed class NotificationService(Database db, IDataProtectionProvider protection, Settings settings, AgentHub agents, AudioService audio, CallService calls)
+public sealed class NotificationService(Database db, IDataProtectionProvider protection, Settings settings, AgentHub agents, AudioService audio, CallService calls, SttSpeech stt)
 {
     // Bound history memory before materializing rows; full content is fetched by ID.
     private const string PreviewSql = "CASE WHEN json_type(data,'$.answer')='object' THEN json_set(data,'$.content.body',substr(json_extract(data,'$.content.body'),1,1000),'$.answer.text',substr(json_extract(data,'$.answer.text'),1,512),'$.previewOnly',json('true')) WHEN json_type(data,'$.formAnswer')='object' THEN json_set(data,'$.content.body',substr(json_extract(data,'$.content.body'),1,1000),'$.formAnswer.values',json('{}'),'$.previewOnly',json('true')) ELSE json_set(data,'$.content.body',substr(json_extract(data,'$.content.body'),1,1000),'$.previewOnly',json('true')) END";
@@ -29,7 +29,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
         Exec(c, t, "INSERT INTO credentials VALUES($h,$k,$i,$e)", ("$h", Wire.Hash(token)), ("$k", kind), ("$i", id), ("$e", Wire.Now + (kind == "device" ? 30L : 90L) * 86400000));
         return token;
     }
-    public Notification Create(Actor actor, CreateNotification input, string key)
+    public Notification Create(Actor actor, CreateNotification input, string key, string? contentHash = null)
     {
         var scope = input.Kind is "message" or "voice" ? "notify:send" : "requests:create";
         actor.RequireScope(scope);
@@ -43,8 +43,8 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
                 if (source is not { Revoked: false } || !source.Scopes.Contains(scope)) throw new Fault(403, "source_revoked_or_scope_changed");
                 using var cmd = Cmd(c, t, "SELECT hash,notification_id FROM idempotency WHERE source_id=$s AND key=$k", ("$s", actor.Id), ("$k", key));
                 using var r = cmd.ExecuteReader();
-                var hash = Wire.Hash(Wire.Encode(input));
-                if (r.Read()) { var oldHash = r.GetString(0); var oldId = r.GetString(1); r.Close(); if (oldHash != hash) throw new Fault(409, "idempotency_conflict"); return Find(c, t, oldId, actor, false); }
+                var hash = contentHash ?? HashContent(input);
+                if (r.Read()) { var oldHash = r.GetString(0); var oldId = r.GetString(1); r.Close(); if (oldHash != hash) throw new Fault(409, "idempotency_conflict"); return Present(Find(c, t, oldId, actor, false)); }
                 r.Close();
                 Validate(input);
                 if (input.Kind == "form" || input.Kind == "voice") input = input with { AllowCustom = false };
@@ -57,10 +57,13 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
                     var notificationId = Wire.Id();
                     var voice = audio.Promote(c, t, actor, input.VoiceUpload!.UploadId, actor.Id, notificationId, expires);
                     promoted = AudioService.FinalPath(settings, voice.AudioId);
-                    input = input with { VoiceUpload = null, Voice = voice };
+                    var transcript = input.VoiceTranscript ?? input.VoiceText;
+                    var protectedTranscript = transcript == null ? null : input.SecurityLevel == "elevated" ? Protect(transcript) : transcript;
+                    voice = voice with { Transcript = protectedTranscript, TranscriptProtected = input.SecurityLevel == "elevated" && transcript != null };
+                    input = input with { VoiceUpload = null, VoiceText = null, VoiceTranscript = null, Voice = voice };
                     var voiceNotification = Add(c, t, actor.Id, input, id: notificationId);
                     Exec(c, t, "INSERT INTO idempotency VALUES($s,$k,$h,$i)", ("$s", actor.Id), ("$k", key), ("$h", hash), ("$i", voiceNotification.Id));
-                    return voiceNotification;
+                    return Present(voiceNotification);
                 }
                 var n = Add(c, t, actor.Id, input);
                 Exec(c, t, "INSERT INTO idempotency VALUES($s,$k,$h,$i)", ("$s", actor.Id), ("$k", key), ("$h", hash), ("$i", n.Id));
@@ -69,9 +72,33 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
         }
         catch { if (promoted != null) AudioService.TryDelete(promoted); throw; }
     }
+    public static string HashContent(CreateNotification input) => Wire.Hash(Wire.Encode(input.Kind == "voice" && input.VoiceText != null
+        ? input with { VoiceUpload = new VoiceInput("synthesized"), VoiceText = null, VoiceTranscript = null }
+        : input));
+    public Notification? TryIdempotent(Actor actor, string key, string hash)
+    {
+        if (key.Length is < 8 or > 128 || key.Any(char.IsControl)) throw new Fault(400, "invalid_idempotency_key");
+        return db.Run((c, t) =>
+        {
+            using var cmd = Cmd(c, t, "SELECT hash,notification_id FROM idempotency WHERE source_id=$s AND key=$k", ("$s", actor.Id), ("$k", key));
+            using var r = cmd.ExecuteReader();
+            if (!r.Read()) return null;
+            var oldHash = r.GetString(0); var oldId = r.GetString(1); r.Close();
+            if (oldHash != hash) throw new Fault(409, "idempotency_conflict");
+            return Present(Find(c, t, oldId, actor, false));
+        });
+    }
+    private static Notification Present(Notification n)
+    {
+        if (n.Content.Kind != "voice" || n.Content.Voice is not { TranscriptProtected: true } voice || voice.Transcript == null) return n;
+        return n with { Content = n.Content with { Voice = voice with { Transcript = null } } };
+    }
     public static void Validate(CreateNotification input)
     {
         var decision = input.Kind is "confirmation" or "form";
+        var voice = input.Kind == "voice";
+        var hasUpload = input.VoiceUpload != null;
+        var hasText = input.VoiceText != null;
         var now = DateTimeOffset.UtcNow;
         if (input.Kind is not ("message" or "confirmation" or "form" or "voice") || input.SecurityLevel is not ("standard" or "elevated") ||
             string.IsNullOrWhiteSpace(input.Title) || input.Title.Length > 160 || input.Title.Any(char.IsControl) || input.Body == null || input.Body.Length > 16000 ||
@@ -79,9 +106,13 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             (input.Kind == "message" && input.SecurityLevel != "standard") ||
             (decision && (input.ExpiresAt == null || input.ExpiresAt <= now || input.ExpiresAt > now.AddDays(30))) ||
             (input.Kind == "form") != (input.Form != null) ||
-            (input.Kind == "voice") != (input.VoiceUpload != null) ||
+            (voice && hasUpload == hasText) ||
+            (!voice && (hasUpload || hasText || input.VoiceTranscript != null)) ||
+            (!voice && input.VoiceText != null) ||
             input.Voice != null ||
-            (input.Kind == "voice" && (input.ExpiresAt == null || input.ExpiresAt <= now || input.ExpiresAt > now.AddDays(30))))
+            (voice && (input.ExpiresAt == null || input.ExpiresAt <= now || input.ExpiresAt > now.AddDays(30))) ||
+            (hasText && (string.IsNullOrWhiteSpace(input.VoiceText) || input.VoiceText.Length > 1000 || input.VoiceText.Any(c => char.IsControl(c) && c is not ('\n' or '\t' or '\r')))) ||
+            (hasUpload && (string.IsNullOrWhiteSpace(input.VoiceTranscript) || input.VoiceTranscript.Length > 16000)))
             throw new Fault(400, "invalid_notification");
         if (input.Kind == "form") ValidateFormSpec(input.Form!);
     }
@@ -186,14 +217,14 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             Queue(c, t, new Job(eventId, "webhook", n.Id, n.SourceId, Wire.Encode(new { eventId, type = "notification." + n.Status, occurredAt=Wire.Now, notification = n })));
         }
     }
-    public Notification Read(Actor actor, string id) { Sweep(); return db.Run((c, t) => Find(c, t, id, actor)); }
+    public Notification Read(Actor actor, string id) { Sweep(); return Present(db.Run((c, t) => Find(c, t, id, actor))); }
     public object List(Actor actor, long before = long.MaxValue, string beforeId = "~", int limit = 50)
     {
         if (!actor.IsOwner) actor.RequireScope("requests:read"); Sweep();
         if (limit is < 1 or > 200 || beforeId.Length > 64) throw new Fault(400, "invalid_pagination");
         return db.Run((c, t) =>
         {
-            var items = Rows(c, t, "SELECT " + PreviewSql + " FROM notifications WHERE " + (actor.IsOwner ? "" : "source_id=$s AND ") + "(created<$b OR (created=$b AND id<$id)) ORDER BY created DESC,id DESC LIMIT $l", ("$s", actor.Id), ("$b", before), ("$id", beforeId), ("$l", limit)).Select(Wire.Decode<Notification>).ToArray();
+            var items = Rows(c, t, "SELECT " + PreviewSql + " FROM notifications WHERE " + (actor.IsOwner ? "" : "source_id=$s AND ") + "(created<$b OR (created=$b AND id<$id)) ORDER BY created DESC,id DESC LIMIT $l", ("$s", actor.Id), ("$b", before), ("$id", beforeId), ("$l", limit)).Select(Wire.Decode<Notification>).Select(Present).ToArray();
             return new { items, next = items.Length == limit ? new { before = items[^1].CreatedAt, beforeId = items[^1].Id } : null };
         });
     }
@@ -206,7 +237,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             var min = long.Parse(Rows(c, t, "SELECT CAST(COALESCE(MIN(seq),0) AS TEXT) FROM changes")[0], System.Globalization.CultureInfo.InvariantCulture);
             if (after == 0 || after > max || after < min - 1)
             {
-                var snapshot = Rows(c, t, "SELECT " + PreviewSql + " FROM notifications ORDER BY created DESC,id DESC LIMIT 1000").Select(Wire.Decode<Notification>).ToList();
+                var snapshot = Rows(c, t, "SELECT " + PreviewSql + " FROM notifications ORDER BY created DESC,id DESC LIMIT 1000").Select(Wire.Decode<Notification>).Select(Present).ToList();
                 return (object)new { cursor = max, items = snapshot, deleted = Array.Empty<string>(), hasMore = false, reset = true };
             }
             using var cmd = Cmd(c, t, "SELECT seq,notification_id FROM changes WHERE seq>$a ORDER BY seq LIMIT 200", ("$a", after));
@@ -214,7 +245,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             while (reader.Read()) { cursor = reader.GetInt64(0); ids.Add(reader.GetString(1)); }
             reader.Close();
             var items = new List<Notification>(); var deleted = new List<string>();
-            foreach (var id in ids) { try { var n = Find(c, t, id, actor); items.Add(n with { Content = n.Content with { Body = n.Content.Body[..Math.Min(1000, n.Content.Body.Length)] }, Answer = n.Answer == null ? null : n.Answer with { Text = n.Answer.Text == null ? null : n.Answer.Text[..Math.Min(512, n.Answer.Text.Length)] }, FormAnswer = n.FormAnswer == null ? null : new FormAnswer(new Dictionary<string, JsonElement>()), PreviewOnly = true }); } catch (Fault e) when (e.Status == 404) { deleted.Add(id); } }
+            foreach (var id in ids) { try { var n = Present(Find(c, t, id, actor)); items.Add(n with { Content = n.Content with { Body = n.Content.Body[..Math.Min(1000, n.Content.Body.Length)] }, Answer = n.Answer == null ? null : n.Answer with { Text = n.Answer.Text == null ? null : n.Answer.Text[..Math.Min(512, n.Answer.Text.Length)] }, FormAnswer = n.FormAnswer == null ? null : new FormAnswer(new Dictionary<string, JsonElement>()), PreviewOnly = true }); } catch (Fault e) when (e.Status == 404) { deleted.Add(id); } }
             return (object)new { cursor, items, deleted, hasMore = Rows(c, t, "SELECT CAST(seq AS TEXT) FROM changes WHERE seq>$a LIMIT 1", ("$a", cursor)).Count != 0, reset = false };
         });
     }
@@ -306,8 +337,24 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
     {
         actor.RequireDevice();
         string? promoted = null, agentId = null; object result = default!;
+        string? transcript = null, transcriptionStatus = "failed", transcriptionError = null;
         try
         {
+            // The WAV is already bounded and validated on upload. Recognition happens before the
+            // durable command transaction, so a timeout cannot leave a half-created message.
+            var pending = db.Run((c, t) => audio.RequirePending(c, t, actor, input.UploadId));
+            var part = AudioService.PartPath(settings, pending.Id);
+            if (!File.Exists(part)) throw new Fault(410, "audio_upload_expired");
+            try
+            {
+                var wav = await File.ReadAllBytesAsync(part, ct);
+                transcript = await stt.RecognizeAsync(wav, ct);
+                transcriptionStatus = "complete";
+            }
+            catch (SpeechException error)
+            {
+                transcriptionError = error.Code;
+            }
             result = db.Run((c, t) =>
             {
                 var related = input.NotificationId == null ? null : Find(c, t, input.NotificationId, actor);
@@ -320,9 +367,9 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
                 var voice = audio.Promote(c, t, actor, input.UploadId, source.Id, null, expires);
                 promoted = AudioService.FinalPath(settings, voice.AudioId); agentId = agent.Id;
                 var id = Wire.Id();
-                Put(c, t, "voicemessage", id, new VoiceMessage(id, source.Id, actor.Id, related.Id, voice.AudioId, voice.DurationMs, voice.SizeBytes, Wire.Now, expires));
-                AgentHub.Enqueue(c, t, agent, "voice_message", new { voiceMessageId = id, audioId = voice.AudioId, durationMs = voice.DurationMs, inReplyTo = related.Id, expiresAt = expires }, expires, correlationId: related.Id, id: id);
-                return (object)new { id, status = "queued", expiresAt = expires, inReplyTo = related.Id };
+                Put(c, t, "voicemessage", id, new VoiceMessage(id, source.Id, actor.Id, related.Id, voice.AudioId, voice.DurationMs, voice.SizeBytes, Wire.Now, expires, transcript, transcriptionStatus, transcriptionError));
+                AgentHub.Enqueue(c, t, agent, "voice_message", new { voiceMessageId = id, audioId = voice.AudioId, durationMs = voice.DurationMs, inReplyTo = related.Id, expiresAt = expires, transcript, transcriptionStatus, transcriptionError }, expires, correlationId: related.Id, id: id);
+                return (object)new { id, status = "queued", expiresAt = expires, inReplyTo = related.Id, transcript, transcriptionStatus };
             });
         }
         catch { if (promoted != null) AudioService.TryDelete(promoted); throw; }
@@ -345,7 +392,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
                 _ => message.ExpiresAt <= Wire.Now ? "expired" : "queued"
             };
             var asset = Get<AudioAsset>(c, t, "audio", message.AudioId);
-            return (object)new { message.Id, status, message.CreatedAt, message.ExpiresAt, message.DurationMs, message.NotificationId, audioAvailable = asset?.Status == "ready" && File.Exists(AudioService.FinalPath(settings, message.AudioId)) };
+            return (object)new { message.Id, status, message.CreatedAt, message.ExpiresAt, message.DurationMs, message.NotificationId, message.Transcript, message.TranscriptionStatus, message.TranscriptionError, audioAvailable = asset?.Status == "ready" && File.Exists(AudioService.FinalPath(settings, message.AudioId)) };
         });
     }
     public void DeleteVoice(Actor actor, string id)
@@ -390,7 +437,10 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             Exec(c, t, "DELETE FROM objects WHERE kind='challenge' AND id=$i", ("$i", ch.Id));
             var asset = Get<AudioAsset>(c, t, "audio", n.Content.Voice.AudioId) ?? throw new Fault(410, "audio_expired");
             var (grant, expires) = audio.CreateGrant(c, t, asset, actor.Id);
-            return (object)new { grant, expiresAt = expires };
+            var accessibleTranscript = n.Content.Voice.TranscriptProtected && n.Content.Voice.Transcript != null
+                ? Unprotect(n.Content.Voice.Transcript)
+                : n.Content.Voice.Transcript;
+            return (object)new { grant, expiresAt = expires, transcript = accessibleTranscript };
         });
     }
     public string AudioFile(Actor actor, string id, string? grant)
@@ -459,6 +509,8 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
                 Exec(c, t, "DELETE FROM objects WHERE kind=$k AND CAST(json_extract(data,'$.expiresAt') AS INTEGER)<$n", ("$k", kind), ("$n", Wire.Now - 3600000));
             Exec(c, t, "DELETE FROM objects WHERE kind='callchallenge' AND CAST(json_extract(data,'$.expiresAt') AS INTEGER)<$n", ("$n", Wire.Now - 3600000));
             Exec(c, t, "DELETE FROM objects WHERE kind='call' AND CAST(json_extract(data,'$.startedAt') AS INTEGER)<$n", ("$n", cutoff));
+            Exec(c, t, "DELETE FROM objects WHERE kind='calltranscript' AND CAST(json_extract(data,'$.updatedAt') AS INTEGER)<$n", ("$n", cutoff));
+            Exec(c, t, "DELETE FROM objects WHERE kind='voicemessage' AND CAST(json_extract(data,'$.expiresAt') AS INTEGER)<$n", ("$n", Wire.Now));
             Exec(c, t, "DELETE FROM objects WHERE kind='delivery' AND json_extract(data,'$.notificationId') NOT IN (SELECT id FROM notifications)");
             Exec(c, t, "DELETE FROM objects WHERE kind='chatgpt_voice' AND CAST(json_extract(data,'$.createdAt') AS INTEGER)<$n", ("$n", cutoff - 86400000L));
             Exec(c, t, "DELETE FROM objects WHERE kind=$k AND CAST(json_extract(data,'$.createdAt') AS INTEGER)<$n", ("$k", ChatGptCall.AttemptKind), ("$n", cutoff));
