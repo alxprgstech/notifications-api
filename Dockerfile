@@ -24,6 +24,9 @@ RUN apt-get update \
 RUN mkdir -p /data && chown 1654:1654 /data && chmod 700 /data
 USER 1654:1654
 ENV ASPNETCORE_HTTP_PORTS=8080 Notify__DataPath=/data DOTNET_gcServer=0
+# A single low-traffic process trading a little startup JIT time for a smaller
+# persistent JIT code heap: no tier0/tier1 duplicates in memfd.
+ENV DOTNET_TieredCompilation=0
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD ["curl","-fsS","http://127.0.0.1:8080/health/live"]
 ENTRYPOINT ["dotnet","Notify.Server.dll"]
