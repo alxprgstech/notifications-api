@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ALXPRGS Notify",
+        "data": {
+          "url": "Notify HTTPS URL",
+          "token": "Integration token"
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "Enter the Notify HTTPS origin",
+      "invalid_auth": "A Notify token with calls:announce is required",
+      "cannot_connect": "Could not contact Notify"
+    },
+    "abort": {
+      "already_configured": "This Notify server is already configured"
+    }
+  }
+}

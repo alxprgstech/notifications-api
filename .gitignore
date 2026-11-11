@@ -20,3 +20,6 @@ firebase-service-account*.json
 *.db*
 *.pem
 service-account*.json
+
+/deploy/codemode/.wrangler/
+/deploy/codemode/.dev.vars*

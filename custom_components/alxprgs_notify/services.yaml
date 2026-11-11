@@ -1,0 +1,25 @@
+call:
+  name: Call
+  description: Ring a Notify phone and read text after the call is answered.
+  fields:
+    text:
+      required: true
+      selector:
+        text:
+    title:
+      selector:
+        text:
+    target:
+      default: android
+      selector:
+        select:
+          options:
+            - android
+            - asterisk
+    idempotency_key:
+      selector:
+        text:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: alxprgs_notify

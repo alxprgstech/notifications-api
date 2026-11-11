@@ -1,0 +1,14 @@
+services:
+  notify-codemode:
+    build: ./deploy/codemode
+    environment:
+      NOTIFY_ORIGIN: https://${NOTIFY_DOMAIN:-notify.alxprgs.tech}
+      NOTIFY_LOCAL: "0"
+      WRANGLER_SEND_METRICS: "false"
+    ports:
+      - "127.0.0.1:8787:8787"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

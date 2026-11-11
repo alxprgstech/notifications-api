@@ -12,9 +12,9 @@
 
 `AgentConnector` подключается к `/api/v1/agents/connect` исходящим WebSocket, шлёт hello/heartbeat, вызывает переданный `AgentRuntime` (например, `CallbackRuntime`) и подтверждает успешные команды. Он не открывает входящий порт и не импортирует код из сети. `Transcriber`/`Synthesizer` — протоколы для вашей среды агента; речевые модели не входят в сервер Notify. Пример: `../../examples/agent_connector.py`.
 
-Голос: `upload_audio(wav)`, `send_voice(title, body, wav=..., expires_at=..., idempotency_key=...)`, `download_audio(audio_id, grant=...)`, `voice_status(id)`; async-клиент повторяет те же методы. WAV должен быть PCM16LE mono 16 кГц, до 5 минут и 10 МиБ; сервер проверяет байты, а не MIME. Голосовой ответ Android приходит агенту как durable-команда `voice_message`.
+Голос: `upload_audio(wav)`, `send_voice(title, body, wav=..., transcript=..., expires_at=..., idempotency_key=...)`, `send_voice_text(title, body, text=..., expires_at=..., idempotency_key=...)`, `download_audio(audio_id, grant=...)`, `voice_status(id)`, `announce_call(title, text, idempotency_key=...)`, `call_transcript(call_id)`; async-клиент повторяет те же методы. WAV должен быть PCM16LE mono 16 кГц, до 5 минут и 10 МиБ; сервер проверяет байты, а не MIME. Для нового явного WAV `transcript` обязателен и непуст; текстовый путь синтезирует серверный Silero и сохраняет текст как расшифровку. Голосовой ответ Android приходит агенту как durable-команда `voice_message` с локально распознанным текстом.
 
-Звонки: `AgentConnector` принимает `call_handler` (`CallHandler.on_invite/on_interrupt/on_ended`, необязательные `on_accepted/on_rejected`), `call_protocols` (по умолчанию `[alxprgs.notify.call.v2]` при `realtime_audio`), методы `dial_call(session_id=..., security_level=...)` (агент звонит владельцу; микрофон не открывается), `wait_call(call_id)`, `accept_call`, `reject_call`, `end_call`, `interrupt`, контекст `call_audio(call_id)`. Сервер выбирает общую версию в `hello_ack.callProtocol`; если она не v2, `dial_call`/`call_audio` сразу возвращают `NotifyCallError("call_protocol_unsupported")`, а текстовые команды продолжают работать. `CallAudio.send(pcm)` ждёт ровно 640 байт и добавляет big-endian `seq/timestamp/generation` (v2, 652 байта); `stream()` отдаёт `("audio", pcm)` и `("event", {...})`. Перед новым ответом после `interrupt` вызовите `set_generation(new_generation)`, иначе сервер отбросит старые кадры. Входящий звонок принимает владелец на Android; FCM содержит только `call_id`/состояние. `interrupt` — barge-in от VAD/речи пользователя; SDK не содержит VAD/STT/TTS и не запускает ложный диалог без провайдера. Записи и расшифровки не сохраняются.
+Звонки: `AgentConnector` принимает `call_handler` (`CallHandler.on_invite/on_interrupt/on_ended`, необязательные `on_accepted/on_rejected/on_user_text/on_speech_error`), `call_protocols` (по умолчанию `[alxprgs.notify.call.v2]` при `realtime_audio`), методы `dial_call(session_id=..., security_level=..., mode=...)` (агент звонит владельцу; микрофон не открывается), `wait_call(call_id)`, `accept_call`, `reject_call`, `end_call`, `interrupt`, `say(call_id,text,turn_id=...)`, контекст `call_audio(call_id)`. Сервер выбирает общую версию в `hello_ack.callProtocol`; если она не v2, `dial_call`/`call_audio` сразу возвращают `NotifyCallError("call_protocol_unsupported")`, а текстовые команды продолжают работать. `mode="conversation"` не открывает media-сокет агента: сервер сам распознаёт речь и присылает `dialog.user`, а агент отвечает `call.say`; `call.interrupted` означает barge-in. `CallAudio.send(pcm)` ждёт ровно 640 байт и добавляет big-endian `seq/timestamp/generation` (v2, 652 байта); `stream()` отдаёт `("audio", pcm)` и `("event", {...})`. Перед новым ответом после `interrupt` вызовите `set_generation(new_generation)`, иначе сервер отбросит старые кадры. Входящий звонок принимает владелец на Android; FCM содержит только `call_id`/состояние. Записи аудио не сохраняются; защищённая расшифровка звонка доступна через `call_transcript` и удаляется с историей. SDK не содержит VAD/STT/TTS.
 Для своей иконки звонка один раз загрузите PNG или WebP с правом `icons:write`. Полученный ID можно сохранить в конфигурации агента и использовать повторно.
 
 ```python
@@ -23,3 +23,11 @@ from pathlib import Path
 icon_id = await connector.upload_icon(Path("avatar.png").read_bytes())
 await connector.dial_call(title="Тестовый звонок", icon_id=icon_id)
 ```
+
+
+### Call routing
+
+Use target="asterisk" with announce_call(), start_conversation(), or
+AgentConnector.dial_call() to ring the configured SIP phone. Android is the
+default. Use call_status() to check the returned call ID. A retry with the same
+idempotency key and identical arguments returns the same call.

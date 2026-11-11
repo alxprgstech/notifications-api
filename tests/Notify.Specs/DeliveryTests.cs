@@ -92,6 +92,21 @@ public sealed class DeliveryTests
             Assert.Equal("pending", n.Status); var ch = svc.Challenge(phone, n.Id, new Answer("yes")); var sig = Convert.ToBase64String(key.SignData(Convert.FromBase64String(ch.Payload), HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence)); svc.Respond(phone, n.Id, new SubmitAnswer(new Answer("yes"), ch.Id, sig));
             var result = await web.GetFromJsonAsync<JsonElement>("/api/v1/management/" + m.Id); var token = result.GetProperty("result").GetProperty("token").GetString(); Assert.NotNull(svc.Authenticate(token!));
             Assert.False((await web.GetFromJsonAsync<JsonElement>("/api/v1/management/" + m.Id)).TryGetProperty("result", out _));
+            web.DefaultRequestHeaders.Remove("Origin");
+            Assert.Equal(HttpStatusCode.Forbidden, (await web.DeleteAsync("/api/v1/voice-messages/" + new string('a', 32))).StatusCode);
         }
     }
+
+    [Theory]
+    [InlineData("8.8.8.8", true)]
+    [InlineData("10.0.0.1", false)]
+    [InlineData("100.64.0.1", false)]
+    [InlineData("2001:4860:4860::8888", true)]
+    [InlineData("2002:7f00:1::1", false)]
+    [InlineData("2001:0:4136:e378::1", false)]
+    [InlineData("64:ff9b::7f00:1", false)]
+    [InlineData("fd00::1", false)]
+    [InlineData("fe80::1", false)]
+    public void WebhookPolicyRejectsTunnelAndPrivateRanges(string address, bool expected) =>
+        Assert.Equal(expected, Notify.WebhookPolicy.IsPublic(System.Net.IPAddress.Parse(address)));
 }

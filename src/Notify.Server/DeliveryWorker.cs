@@ -19,7 +19,15 @@ public static class WebhookPolicy
     public static bool IsPublic(IPAddress ip)
     {
         if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4(); var b = ip.GetAddressBytes();
-        if (b.Length == 16) return (b[0] & 0xe0) == 0x20 && !(b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8);
+        if (b.Length == 16)
+        {
+            if ((b[0] & 0xe0) != 0x20) return false;
+            // 6to4 and Teredo can tunnel an otherwise private IPv4 destination.
+            if (b[0] == 0x20 && b[1] == 0x02) return false;
+            if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00) return false;
+            if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false;
+            return true;
+        }
         return b[0] is not (0 or 10 or 127) && b[0] < 224 && !(b[0] == 100 && b[1] is >= 64 and <= 127) && !(b[0] == 169 && b[1] == 254) && !(b[0] == 172 && b[1] is >= 16 and <= 31) && !(b[0] == 192 && (b[1] == 168 || b[1] == 0 || (b[1] == 2))) && !(b[0] == 198 && (b[1] is 18 or 19 || (b[1] == 51 && b[2] == 100))) && !(b[0] == 203 && b[1] == 0 && b[2] == 113);
     }
     public static SocketsHttpHandler Handler() => new()

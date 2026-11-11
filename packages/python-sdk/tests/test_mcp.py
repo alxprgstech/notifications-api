@@ -12,7 +12,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                 async with ClientSession(streams[0], streams[1]) as session:
                     await session.initialize()
                     result = await session.list_tools()
-                    self.assertEqual({t.name for t in result.tools}, {"send_notification", "request_confirmation", "request_form", "get_request", "wait_for_response", "cancel_request"})
+                    self.assertEqual({t.name for t in result.tools}, {"send_notification", "request_confirmation", "request_form", "get_request", "wait_for_response", "cancel_request", "start_call", "start_conversation", "get_call_status"})
         await asyncio.wait_for(scenario(), timeout=25)
 
 

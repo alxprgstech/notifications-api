@@ -580,6 +580,255 @@ public sealed class CallTests
     }
 
     [Fact]
+    public async Task AsteriskAnnouncementHasIndependentRouteAndDelay()
+    {
+        using var app = new AppFactory { UseSpeechStub = true, CallAudioStartDelayMs = 150 };
+        var (sourceClient, _) = app.Integration(scopes: ["calls:announce"]);
+        var (bridgeClient, _) = app.Integration(scopes: ["telephony:bridge"]);
+        var (phoneClient, _, phoneKey) = app.Device();
+        using (sourceClient) using (bridgeClient) using (phoneClient) using (phoneKey)
+        {
+            const string route = "/api/v1/calls/announce";
+            var input = new { title = "Notify", text = "Проверка", idempotencyKey = "asterisk-test-1", target = "asterisk" };
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, (await sourceClient.PostAsJsonAsync(route, input)).StatusCode);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var control = await Ws(app, Token(bridgeClient)).ConnectAsync(new Uri("ws://localhost/api/v1/telephony/connect"), deadline.Token);
+            await control.SendAsync(System.Text.Encoding.UTF8.GetBytes("""{"type":"heartbeat"}"""), WebSocketMessageType.Text, true, deadline.Token);
+            Assert.Equal("heartbeat_ack", (await ReceiveJson(control)).GetProperty("type").GetString());
+            var started = await sourceClient.PostAsJsonAsync(route, input);
+            started.EnsureSuccessStatusCode();
+            var state = await started.Content.ReadFromJsonAsync<JsonElement>();
+            var id = state.GetProperty("id").GetString();
+            Assert.Equal("asterisk", state.GetProperty("target").GetString());
+            var invite = await ReceiveJson(control);
+            Assert.Equal(id, invite.GetProperty("callId").GetString());
+            Assert.Equal(HttpStatusCode.NotFound, (await phoneClient.GetAsync("/api/v1/calls/incoming")).StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, (await phoneClient.PostAsJsonAsync($"/api/v1/calls/{id}/accept", new { })).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await sourceClient.PostAsJsonAsync(route, input with { target = "android" })).StatusCode);
+            var repeat = await sourceClient.PostAsJsonAsync(route, input);
+            Assert.Equal(id, (await repeat.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString());
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            using var audio = await Ws(app, Token(bridgeClient)).ConnectAsync(
+                new Uri($"ws://localhost/api/v1/telephony/calls/{id}/audio?inviteId={invite.GetProperty("inviteId").GetString()}"), deadline.Token);
+            Assert.Equal("active", (await ReceiveJson(audio)).GetProperty("status").GetString());
+            var first = await ReceiveAny(audio, deadline.Token);
+            Assert.Equal(WebSocketMessageType.Binary, first.Item1);
+            Assert.True(clock.ElapsedMilliseconds >= 130);
+            Assert.Equal(HttpStatusCode.Forbidden, (await sourceClient.GetAsync($"/api/v1/calls/{id}/transcript")).StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task AnnouncementSendsLastFrameThenEndedBeforeClose()
+    {
+        using var app = new AppFactory { UseSpeechStub = true };
+        var (sourceClient, source) = app.Integration(scopes: ["calls:start"]);
+        var (phoneClient, phone, phoneKey) = app.Device();
+        using (sourceClient) using (phoneClient) using (phoneKey)
+        {
+            var started = await sourceClient.PostAsJsonAsync("/api/v1/calls/announce", new
+            {
+                idempotencyKey = "announce-test-1",
+                title = "Announcement",
+                text = "Проверка завершена",
+            });
+            started.EnsureSuccessStatusCode();
+            var created = await started.Content.ReadFromJsonAsync<JsonElement>();
+            var callId = created.GetProperty("id").GetString()!;
+            Assert.Equal("playback", created.GetProperty("mode").GetString());
+            var accepted = await phoneClient.PostAsJsonAsync($"/api/v1/calls/{callId}/accept", new { });
+            accepted.EnsureSuccessStatusCode();
+            var phoneMedia = await Ws(app, Token(phoneClient)).ConnectAsync(new Uri($"ws://localhost/api/v1/calls/{callId}/audio"), CancellationToken.None);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var binary = 0; JsonElement ended = default; WebSocketMessageType? close = null;
+            while (true)
+            {
+                var (type, data) = await ReceiveAny(phoneMedia, deadline.Token);
+                if (type == WebSocketMessageType.Binary) { binary++; continue; }
+                if (type == WebSocketMessageType.Close) { close = type; break; }
+                using var document = JsonDocument.Parse(data);
+                if (document.RootElement.GetProperty("type").GetString() == "ended") { ended = document.RootElement.Clone(); break; }
+            }
+            Assert.True(binary > 0);
+            Assert.Equal("ended", ended.GetProperty("type").GetString());
+            Assert.Equal("playback_sent", ended.GetProperty("reason").GetString());
+            if (close != null) Assert.Equal(WebSocketMessageType.Close, close);
+            await WaitStatus(phoneClient, callId, "ended");
+            using var transcript = JsonDocument.Parse(await phoneClient.GetStringAsync($"/api/v1/calls/{callId}/transcript"));
+            var turn = transcript.RootElement.GetProperty("turns").EnumerateArray().First();
+            Assert.Equal("agent", turn.GetProperty("speaker").GetString());
+            Assert.Equal("Проверка завершена", turn.GetProperty("text").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task ChatGptConversationExposesTranscriptAndServerSpeechWithoutAgent()
+    {
+        using var app = new AppFactory { UseSpeechStub = true };
+        var (sourceClient, source) = app.Integration(scopes: ["calls:start"]);
+        var (phoneClient, phone, phoneKey) = app.Device();
+        using (sourceClient) using (phoneClient) using (phoneKey)
+        {
+            var actor = new Actor("integration", source.Id, ["calls:start"]);
+            var chat = app.Services.GetRequiredService<ChatGptCall>();
+            var created = Wire.Decode<JsonElement>(await chat.StartConversation(actor, "ChatGPT call", "chatgpt-conversation-1", CancellationToken.None));
+            var callId = created.GetProperty("id").GetString()!;
+            var accepted = await phoneClient.PostAsJsonAsync($"/api/v1/calls/{callId}/accept", new { });
+            accepted.EnsureSuccessStatusCode();
+            var phoneMedia = await Ws(app, Token(phoneClient)).ConnectAsync(new Uri($"ws://localhost/api/v1/calls/{callId}/audio"), CancellationToken.None);
+            _ = await ReceiveJson(phoneMedia);
+            var seq = 0u; var timestamp = 0u;
+            for (var i = 0; i < 20; i++) { await SendBinary(phoneMedia, Frame(seq++, timestamp, 0x33)); timestamp += 20; }
+            for (var i = 0; i < 40; i++) { await SendBinary(phoneMedia, Frame(seq++, timestamp, 0x00)); timestamp += 20; }
+            JsonElement transcript = default;
+            for (var i = 0; i < 20; i++)
+            {
+                transcript = JsonDocument.Parse(chat.Transcript(actor, callId)).RootElement.Clone();
+                if (transcript.GetProperty("turns").GetArrayLength() > 0) break;
+                await Task.Delay(100);
+            }
+            Assert.Equal("user", transcript.GetProperty("turns").EnumerateArray().First().GetProperty("speaker").GetString());
+            var say = Wire.Decode<JsonElement>(chat.Speak(actor, callId, "Ответ из ChatGPT", "chatgpt-say-1"));
+            Assert.True(say.GetProperty("ok").GetBoolean());
+            var sawAgent = false; var binary = 0;
+            for (var i = 0; i < 12 && (!sawAgent || binary == 0); i++)
+            {
+                var (type, data) = await ReceiveAny(phoneMedia);
+                if (type == WebSocketMessageType.Binary) binary++;
+                else if (type == WebSocketMessageType.Text)
+                {
+                    using var document = JsonDocument.Parse(data);
+                    if (document.RootElement.TryGetProperty("turn", out var turn) && turn.GetProperty("speaker").GetString() == "agent") sawAgent = true;
+                }
+            }
+            Assert.True(sawAgent); Assert.True(binary > 0);
+            await phoneClient.PostAsync($"/api/v1/calls/{callId}/end", null);
+            await WaitStatus(phoneClient, callId, "ended");
+            transcript = JsonDocument.Parse(chat.Transcript(actor, callId)).RootElement.Clone();
+            Assert.Equal(2, transcript.GetProperty("turns").GetArrayLength());
+        }
+    }
+
+    [Fact]
+    public async Task ConversationUsesLocalSttSelectedAgentAndServerSilero()
+    {
+        using var app = new AppFactory { UseSpeechStub = true };
+        var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]);
+        var (phoneClient, phone, phoneKey) = app.Device();
+        using (sourceClient) using (phoneClient) using (phoneKey)
+        {
+            var agent = RegisterAgent(app, source.Id); using var control = await ConnectAgent(app, Token(sourceClient), agent);
+            var started = await phoneClient.PostAsJsonAsync("/api/v1/calls", new { sourceId = source.Id, sessionId = "task-1", mode = "conversation" });
+            started.EnsureSuccessStatusCode();
+            var callId = (await started.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!;
+            using (var invite = JsonDocument.Parse(Wire.Encode(await ReceiveJson(control))))
+                Assert.Equal("conversation", invite.RootElement.GetProperty("payload").GetProperty("mode").GetString());
+            await SendText(control, new { type = "call.accept", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
+            await WaitStatus(phoneClient, callId, "connecting");
+            var phoneMedia = await Ws(app, Token(phoneClient)).ConnectAsync(new Uri($"ws://localhost/api/v1/calls/{callId}/audio"), CancellationToken.None);
+            _ = await ReceiveJson(phoneMedia); // state active
+            _ = await ReceiveJson(control); // call.active
+
+            var seq = 0u; var timestamp = 0u;
+            for (var i = 0; i < 20; i++) { await SendBinary(phoneMedia, Frame(seq++, timestamp, 0x33)); timestamp += 20; }
+            for (var i = 0; i < 40; i++) { await SendBinary(phoneMedia, Frame(seq++, timestamp, 0x00)); timestamp += 20; }
+
+            JsonElement dialog = default;
+            for (var i = 0; i < 8; i++)
+            {
+                var frame = await ReceiveJson(control);
+                if (frame.GetProperty("type").GetString() == "dialog.user") { dialog = frame; break; }
+            }
+            Assert.Equal("dialog.user", dialog.GetProperty("type").GetString());
+            Assert.Equal("Проверь сборку", dialog.GetProperty("payload").GetProperty("text").GetString());
+            var turnId = dialog.GetProperty("payload").GetProperty("turnId").GetString()!;
+            await SendText(control, new { type = "call.say", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId, turnId, text = "Сборка прошла" } });
+
+            var sawAgentTranscript = false; var binaryFrames = 0;
+            for (var i = 0; i < 12 && (!sawAgentTranscript || binaryFrames == 0); i++)
+            {
+                var (type, data) = await ReceiveAny(phoneMedia);
+                if (type == WebSocketMessageType.Binary) binaryFrames++;
+                else if (type == WebSocketMessageType.Close) Assert.Fail("phone media closed before transcript: " + Encoding.UTF8.GetString(data));
+                else
+                {
+                    using var document = JsonDocument.Parse(data);
+                    var kind = document.RootElement.GetProperty("type").GetString();
+                    if (kind == "transcript")
+                    {
+                        var turn = document.RootElement.GetProperty("turn");
+                        if (turn.GetProperty("speaker").GetString() == "agent" && turn.GetProperty("text").GetString() == "Сборка прошла") sawAgentTranscript = true;
+                    }
+                }
+            }
+            Assert.True(sawAgentTranscript);
+            Assert.True(binaryFrames > 0);
+            Assert.Contains("Сборка прошла", app.Speech.Synthesized);
+
+            await SendText(control, new { type = "call.end", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
+            await WaitStatus(phoneClient, callId, "ended");
+            using var transcript = JsonDocument.Parse(await phoneClient.GetStringAsync($"/api/v1/calls/{callId}/transcript"));
+            var turns = transcript.RootElement.GetProperty("turns").EnumerateArray().ToArray();
+            Assert.Equal(2, turns.Length);
+            Assert.Equal("user", turns[0].GetProperty("speaker").GetString());
+            Assert.Equal("agent", turns[1].GetProperty("speaker").GetString());
+            Assert.False(transcript.RootElement.GetProperty("partial").GetBoolean());
+            var stored = app.Services.GetRequiredService<Database>().Run((c, t) => Rows(c, t, "SELECT data FROM objects WHERE kind='calltranscript'").Single());
+            Assert.DoesNotContain("Проверь сборку", stored);
+            Assert.DoesNotContain("Сборка прошла", stored);
+        }
+    }
+
+    [Fact]
+    public async Task ConversationBargeInClearsGenerationAndPartialSttStaysVisible()
+    {
+        using var app = new AppFactory { UseSpeechStub = true };
+        var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]);
+        var (phoneClient, phone, phoneKey) = app.Device();
+        using (sourceClient) using (phoneClient) using (phoneKey)
+        {
+            var agent = RegisterAgent(app, source.Id); using var control = await ConnectAgent(app, Token(sourceClient), agent);
+            var started = await phoneClient.PostAsJsonAsync("/api/v1/calls", new { sourceId = source.Id, sessionId = "task-1", mode = "conversation" });
+            started.EnsureSuccessStatusCode(); var callId = (await started.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString()!;
+            _ = await ReceiveJson(control);
+            await SendText(control, new { type = "call.accept", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
+            await WaitStatus(phoneClient, callId, "connecting");
+            var phoneMedia = await Ws(app, Token(phoneClient)).ConnectAsync(new Uri($"ws://localhost/api/v1/calls/{callId}/audio"), CancellationToken.None);
+            _ = await ReceiveJson(phoneMedia); _ = await ReceiveJson(control);
+            var seq = 0u; var timestamp = 0u;
+            for (var i = 0; i < 20; i++) { await SendBinary(phoneMedia, Frame(seq++, timestamp, 0x33)); timestamp += 20; }
+            for (var i = 0; i < 40; i++) { await SendBinary(phoneMedia, Frame(seq++, timestamp, 0x00)); timestamp += 20; }
+            JsonElement dialog = default;
+            for (var i = 0; i < 8; i++) { var frame = await ReceiveJson(control); if (frame.GetProperty("type").GetString() == "dialog.user") { dialog = frame; break; } }
+            var turnId = dialog.GetProperty("payload").GetProperty("turnId").GetString()!;
+            await SendText(control, new { type = "call.say", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId, turnId, text = "Длинный ответ" } });
+            var sawAgentSpeech = false;
+            for (var i = 0; i < 10 && !sawAgentSpeech; i++)
+            {
+                var (type, data) = await ReceiveAny(phoneMedia);
+                if (type == WebSocketMessageType.Binary) sawAgentSpeech = true;
+                else if (type != WebSocketMessageType.Close)
+                {
+                    using var document = JsonDocument.Parse(data);
+                    sawAgentSpeech = document.RootElement.TryGetProperty("turn", out var turn)
+                        && turn.GetProperty("speaker").GetString() == "agent";
+                }
+            }
+            Assert.True(sawAgentSpeech);
+            // A new voiced frame must interrupt the old generation and clear its queue.
+            for (var i = 0; i < 20; i++) { await SendBinary(phoneMedia, Frame(seq++, timestamp, 0x44)); timestamp += 20; }
+            JsonElement interrupted = default;
+            for (var i = 0; i < 12; i++) { var frame = await ReceiveJson(control); if (frame.GetProperty("type").GetString() == "call.interrupted") { interrupted = frame; break; } }
+            Assert.Equal("call.interrupted", interrupted.GetProperty("type").GetString());
+            Assert.True(interrupted.GetProperty("payload").GetProperty("generation").GetInt32() > 1);
+            await SendText(control, new { type = "call.end", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
+            await WaitStatus(phoneClient, callId, "ended");
+            using var transcript = JsonDocument.Parse(await phoneClient.GetStringAsync($"/api/v1/calls/{callId}/transcript"));
+            Assert.True(transcript.RootElement.GetProperty("turns").GetArrayLength() >= 2);
+        }
+    }
+
+    [Fact]
     public async Task CallRejectsMalformedMediaFrame()
     {
         using var app = new AppFactory(); var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]); var (phoneClient, phone, phoneKey) = app.Device(); using (sourceClient) using (phoneClient) using (phoneKey)

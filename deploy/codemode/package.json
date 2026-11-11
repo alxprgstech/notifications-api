@@ -1,0 +1,18 @@
+{
+  "name": "alxprgs-notify-codemode",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "wrangler dev --local --ip 0.0.0.0",
+    "check": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "4.1.6",
+    "@cloudflare/codemode": "0.5.6",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "wrangler": "4.160.1"
+  }
+}

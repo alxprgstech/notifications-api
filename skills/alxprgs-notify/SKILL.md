@@ -5,7 +5,7 @@ description: Send notifications and request action-specific human decisions thro
 
 # ALXPRGS Notify
 
-Use the connected Notify MCP tools. If only Python is configured, use the installed `alxprgs_notify` package with `NOTIFY_URL` and `NOTIFY_TOKEN` from the environment; do not read or print token values. `GET /api/v1/session` reports the current `actor` and `csrfToken`; an integration sender does not need CSRF, and an empty-body 401 means the token is missing, expired, or revoked.
+Use the connected Notify MCP tools. If the Notify Code Mode server is configured, use its typed code tool to compose operations, preserving the current authorization and approval policy. If only Python is configured, use the installed `alxprgs_notify` package with `NOTIFY_URL` and `NOTIFY_TOKEN` from the environment; do not read or print token values. `GET /api/v1/session` reports the current `actor` and `csrfToken`; an integration sender does not need CSRF, and an empty-body 401 means the token is missing, expired, or revoked.
 
 For an informational update call `send_notification`. When a decision is needed, call `request_confirmation` with a concise action description, consequences, expiration and a stable idempotency key for that action. Use `elevated` for sensitive actions. Do not include credentials or unnecessary private data in notification text.
 
@@ -17,6 +17,6 @@ For a structured request use `request_form` with 1–20 fields (`text`, `boolean
 
 Approval is bound to the displayed action. If its substance changes, obtain a new decision. Notify does not override the host environment's access rules or built-in permission checks.
 
-Use `start_call` when it is available on the connected OAuth MCP server and the user asks to ring their Android phone. It reads the supplied Russian text after manual acceptance. A result of `ringing` means the invitation is pending. Repeat with identical arguments and the same idempotency key to check the state without placing another call. `playback_sent` confirms server transmission of the audio frames. Use `send_voice` for a voice message.
+Use `start_call` when it is available on the connected OAuth MCP server and the user asks to ring their phone. Pass target="asterisk" when the user selects their configured desk phone. It reads the supplied Russian text after manual acceptance. A result of `ringing` means the invitation is pending. Repeat with identical arguments and the same idempotency key to check the state without placing another call. `playback_sent` confirms server transmission of the audio frames. Use `send_voice` for a voice message.
 
 Live Android/SDK calls require an agent that negotiates `alxprgs.notify.call.v2` through `callProtocols` in hello. An old/unknown agent remains usable for text/voice messages. Audio is not recorded. Mute does not create sequence gaps, and barge-in cancels the old generation. See `/api/config` capabilities.

@@ -10,6 +10,8 @@
 $notifyHome = Join-Path $env:LOCALAPPDATA 'ALXPRGS\Notify'
 $notifyEnv = Join-Path $notifyHome 'home.env'
 $env:SILERO_MODEL_FILE = Join-Path $notifyHome 'v5_6_ru.pt'
+$env:STT_MODEL_DIR = Join-Path $notifyHome 'models\vosk-model-small-ru-0.22'
+pwsh -File scripts/setup-stt-model.ps1 -Destination $env:STT_MODEL_DIR
 $env:NOTIFY_IMAGE = 'alxprgs-notify:chatgpt-local'
 docker compose --env-file $notifyEnv -f compose.yml -f compose.home.yml -f compose.chatgpt.yml config --quiet
 docker compose --env-file $notifyEnv -f compose.yml -f compose.home.yml -f compose.chatgpt.yml up -d --build
@@ -31,14 +33,19 @@ docker compose --env-file $notifyEnv -f compose.yml -f compose.home.yml -f compo
 | Инструменты | Право |
 | --- | --- |
 | `send_notification`, `send_voice` | `notify:send` |
-| `start_call` | `calls:start` |
+| `start_call`, `start_conversation` | `calls:start` |
+| `get_call_transcript`, `speak_call` | `calls:start` |
 | `request_confirmation`, `request_form` | `requests:create` |
 | `get_request`, `wait_for_response` | `requests:read` |
 | `cancel_request` | `requests:cancel` |
 
 `send_voice(title, text, expiresAt, idempotencyKey)` принимает до 1 000 символов русского текста. Для повторов сохраняйте исходный ключ и аргументы. При отказе Silero остаются доступны текстовые инструменты. Повышенные подтверждения требуют системной биометрии или PIN и подписи Android.
 
-`start_call(title, text, idempotencyKey)` синтезирует до 300 символов русского текста через Silero и вызывает доверенные телефоны Notify. После ручного принятия и подключения Android сервер передаёт фразу по медиа-протоколу звонка v2 и завершает вызов. Android использует обычный экран вызова с доступом к микрофону после принятия. Сервер отбрасывает аудио с телефона и сохраняет в истории только метаданные звонка.
+`start_call(title, text, idempotencyKey)` синтезирует до 300 символов русского текста через Silero и вызывает доверенные телефоны Notify. После ручного принятия и подключения Android сервер передаёт фразу по медиа-протоколу звонка v2 и завершает вызов. Android использует обычный экран вызова с доступом к микрофону после принятия. Сервер отбрасывает аудио с телефона; в истории остаются метаданные и защищённая расшифровка произнесённой фразы, без записи аудио.
+
+`start_conversation(title, idempotencyKey)` запускает разговор без кнопки «Говорить». Телефон принимает вручную; сервер локально распознаёт русскую речь и складывает реплики в защищённую расшифровку. ChatGPT не получает push в тот же чат: следующий MCP-вызов `get_call_transcript(callId)` читает новые реплики, а `speak_call(callId, text, idempotencyKey)` озвучивает ответ через серверный Silero. Это ограничение протокола ChatGPT/MCP — инструмент вызывается только в рамках хода чата, а не автономно. Для полностью живого двустороннего цикла используйте Codex/Harness-мост, где среда сама доставляет реплику в явно выбранный чат.
+
+Для conversation-режима нужен локальный STT: `pwsh -File scripts/setup-stt-model.ps1`, затем `STT_MODEL_DIR` в окружении Compose. Без `Notify__SttUrl` сервер не объявляет `conversation` и не начинает такой звонок.
 
 Первый ответ содержит `id` и состояние звонка, обычно `ringing`. Повтор с теми же аргументами и ключом возвращает состояние того же звонка без перезвона в пределах 30-дневного хранения. Причина `playback_sent` означает, что сервер отправил все кадры в WebSocket Android. Если сервер перезапустился до завершения, повтор вернёт `interrupted`. При отказе Silero звонок не создаётся.
 

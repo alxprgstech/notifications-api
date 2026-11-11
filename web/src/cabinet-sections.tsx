@@ -6,7 +6,7 @@ export type Notification = {
   id: string; sourceId: string; status: string; createdAt: number; previewOnly?: boolean;
   content: {
     kind: string; title: string; body: string; securityLevel: string; expiresAt?: string;
-    voice?: { durationMs: number };
+    voice?: { durationMs: number; transcript?: string; transcriptProtected?: boolean };
   };
   answer?: { decision: string; text?: string };
 };
@@ -21,6 +21,7 @@ export type Agent = {
 export type Call = {
   id: string; sourceId: string; agentId: string; sessionId?: string; securityLevel: string;
   startedAt: number; status: string; reason?: string; durationMs: number; direction?: string;
+  mode?: string; hasTranscript?: boolean; transcriptPartial?: boolean;
 };
 export type ManagementInput =
   | { action: 'chatgpt.link' }
@@ -52,6 +53,8 @@ const callReasons: Record<string, string> = {
   rejected: 'Отклонён', missed: 'Нет ответа', timeout: 'Время истекло', disconnected: 'Связь прервана',
   unsupported: 'Не поддерживается', busy: 'Занято', invalid_audio: 'Ошибка аудио',
   degraded: 'Проблемы с сетью', revoked: 'Доступ отозван', ended: 'Завершён',
+  playback_sent: 'Фраза воспроизведена', interrupted: 'Прерван', stt_unavailable: 'STT недоступен',
+  stt_timeout: 'STT не успел', stt_empty: 'Речь не распознана',
 };
 const dateTime = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 const dayFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'full' });
@@ -174,6 +177,8 @@ export function EventDetail({ preview, full, sources, error, retry, close }: {
           {full.content.body && <p className="full-body">{full.content.body}</p>}
           {answer && <p className="detail-answer"><strong>Ответ</strong> {answer.decision === 'yes' ? 'Да' : answer.decision === 'no' ? 'Нет' : answer.text}</p>}
           {full.content.kind === 'voice' && <p>Голосовое сообщение{full.content.voice ? ' · ' + Math.round(full.content.voice.durationMs / 1000) + ' с' : ''}. Прослушивание доступно в приложении.</p>}
+          {full.content.kind === 'voice' && full.content.voice?.transcript && <p><strong>Расшифровка:</strong> {full.content.voice.transcript}</p>}
+          {full.content.kind === 'voice' && full.content.voice?.transcriptProtected === true && !full.content.voice.transcript && <p>Расшифровка защищённого сообщения откроется в приложении после подтверждения личности.</p>}
           {full.content.kind === 'form' && full.status === 'answered' && <p>Ответ формы получен в приложении.</p>}
           {isPending(full, now) && <Notice title="Откройте Notify на телефоне, чтобы ответить" />}
         </>}
@@ -249,8 +254,25 @@ export function Devices({ devices, busy, open, blocked }: {
 }
 
 export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agents: Agent[]; sources: Source[]; blocked: boolean }) {
+  const [transcripts, setTranscripts] = useState<Record<string, { turns: { id: string; speaker: string; text: string; status?: string; error?: string }[]; partial: boolean; error?: string }>>({});
+  const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
+  const loadTranscript = async (id: string) => {
+    if (transcripts[id] !== undefined || transcriptErrors[id] !== undefined) return;
+    try {
+      const response = await fetch(`/api/v1/calls/${id}/transcript`, { credentials: 'same-origin' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof body.code === 'string' ? body.code : 'transcript_unavailable');
+      setTranscripts(current => ({ ...current, [id]: {
+        turns: Array.isArray(body.turns) ? body.turns : [],
+        partial: body.partial === true,
+        error: typeof body.error === 'string' ? body.error : undefined,
+      } }));
+    } catch (error) {
+      setTranscriptErrors(current => ({ ...current, [id]: error instanceof Error ? error.message : 'transcript_unavailable' }));
+    }
+  };
   return <>
-    <Notice title="В журнале хранятся только сведения о звонках"><p>Записи и расшифровки разговоров не сохраняются.</p></Notice>
+    <Notice title="История звонков"><p>Хранятся метаданные и расшифровки новых разговоров; аудио не сохраняется. Текст удаляется вместе с 30-дневной записью.</p></Notice>
     {!calls.length && !blocked && <Empty icon="call" title="Звонков пока нет"
       text="Позвоните агенту или примите входящий звонок в приложении Notify." />}
     {!!calls.length && <ul className="panel call-list">{calls.map(call => {
@@ -260,10 +282,20 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
       const reason = call.reason || call.status;
       const seconds = Math.round(call.durationMs / 1000);
       const duration = seconds < 60 ? seconds + ' с' : Math.floor(seconds / 60) + ' мин ' + seconds % 60 + ' с';
+      const transcript = transcripts[call.id];
+      const transcriptError = transcriptErrors[call.id];
       return <li key={call.id}>
         <span className="entity-icon accent"><Icon name="call" /></span>
         <div className="call-party"><strong>{peer}</strong><p>{direction} · {dateTime.format(call.startedAt)}</p></div>
-        <div className="call-result"><strong>{callReasons[reason] ?? (reason || 'Завершён')}</strong><p>{duration}</p></div>
+        <div className="call-result"><strong>{callReasons[reason] ?? (reason || 'Завершён')}</strong><p>{duration}{call.mode === 'conversation' ? ' · разговор' : ''}</p>
+          {call.hasTranscript === true && <details onToggle={event => { if (event.currentTarget.open) void loadTranscript(call.id); }}>
+            <summary>Расшифровка</summary>
+            {transcript === undefined && transcriptError === undefined && <p>Загружаем…</p>}
+            {transcriptError !== undefined && <p>Не удалось загрузить: {transcriptError}</p>}
+            {transcript?.partial === true && <p>Распознано неполно; полученные реплики сохранены.</p>}
+            {transcript?.turns.map(turn => <p key={turn.id}><strong>{turn.speaker === 'user' ? 'Вы' : 'Агент'}:</strong> {turn.status === 'error' ? `ошибка распознавания (${turn.error ?? 'unknown'})` : turn.text}</p>)}
+          </details>}
+        </div>
         <Badge tone={call.securityLevel === 'elevated' ? 'info' : 'neutral'}>
           {call.securityLevel === 'elevated' && <Icon name="shield" size={14} />}
           {call.securityLevel === 'elevated' ? 'С проверкой личности' : 'Обычный'}
@@ -280,6 +312,7 @@ export function ManagementDialog({ form, close, submit }: {
 }) {
   const [name, setName] = useState('');
   const [webhook, setWebhook] = useState('');
+  const [sourceType, setSourceType] = useState('default');
   const [selected, setSelected] = useState(['text_tasks']);
   if (form.kind === 'revoke-source' || form.kind === 'revoke-device') {
     const source = form.kind === 'revoke-source';
@@ -298,7 +331,7 @@ export function ManagementDialog({ form, close, submit }: {
     <form className="management-form" onSubmit={event => {
       event.preventDefault();
       if (!name.trim()) return;
-      if (form.kind === 'create') submit({ action: 'integration.create', name: name.trim(), scopes: sourceScopes, webhookUrl: webhook.trim() || null });
+      if (form.kind === 'create') submit({ action: 'integration.create', name: name.trim(), scopes: sourceType === 'default' ? sourceScopes : sourceType === 'code' ? [...sourceScopes, 'calls:start'] : [sourceType], webhookUrl: sourceType === 'default' || sourceType === 'code' ? webhook.trim() || null : null });
       if (form.kind === 'agent' && selected.length) submit({ action: 'agent.register', targetId: form.source.id, name: name.trim(), capabilities: selected });
     }}>
       {form.kind === 'agent' && <p>Источник <strong>{form.source.name}</strong></p>}
@@ -307,10 +340,18 @@ export function ManagementDialog({ form, close, submit }: {
           placeholder={creating ? 'Например, мониторинг' : 'Например, рабочий компьютер'} />
       </label>
       {creating ? <>
-        <label className="field"><span>Webhook <small>Необязательно</small></span>
-          <input value={webhook} onChange={event => setWebhook(event.target.value)} type="url" placeholder="https://service.example/notify" />
+        <label className="field">Права источника
+          <select value={sourceType} onChange={event => setSourceType(event.target.value)}>
+            <option value="default">Сообщения, запросы и подключение агента</option>
+            <option value="code">Агентские операции и звонки Code Mode</option>
+            <option value="calls:announce">Home Assistant · звонки с озвучкой</option>
+            <option value="telephony:bridge">Мост Asterisk</option>
+          </select>
         </label>
-        <p>Источник сможет отправлять сообщения, запрашивать подтверждения и формы, управлять своими запросами, загружать иконки и подключать агента. Токен действует 90 дней.</p>
+        {(sourceType === 'default' || sourceType === 'code') && <label className="field"><span>Webhook <small>Необязательно</small></span>
+          <input value={webhook} onChange={event => setWebhook(event.target.value)} type="url" placeholder="https://service.example/notify" />
+        </label>}
+        <p>Токен действует 90 дней.</p>
       </> : <fieldset><legend>Возможности агента</legend>
         {Object.entries(capabilities).map(([id, label]) => <label className="checkbox" key={id}>
           <input type="checkbox" checked={selected.includes(id)}

@@ -75,10 +75,10 @@ try:
             result=api.wait(notification["id"],timeout=1)
             assert result["status"]=="answered" and result["formAnswer"]["values"]["env"]=="prod",result
         sample=b"RIFF"+struct.pack("<I",36+32000)+b"WAVE"+b"fmt "+struct.pack("<I",16)+struct.pack("<HHIIHH",1,1,16000,32000,2,16)+b"data"+struct.pack("<I",32000)+b"\0"*32000
-        voice=api.send_voice("Synthetic voice","No external action",wav=sample,expires_at=expiry,idempotency_key=secrets.token_hex(16))
+        voice=api.send_voice("Synthetic voice","No external action",wav=sample,transcript="Синтетическая голосовая расшифровка",expires_at=expiry,idempotency_key=secrets.token_hex(16))
         assert voice["content"]["voice"]["durationMs"]==1000,voice
         response=phone.get(f"/api/v1/audio/{voice['content']['voice']['audioId']}");response.raise_for_status();assert response.content==sample
-        elevated_voice=api.send_voice("Synthetic secret voice","No external action",wav=sample,expires_at=expiry,idempotency_key=secrets.token_hex(16),security_level="elevated")
+        elevated_voice=api.send_voice("Synthetic secret voice","No external action",wav=sample,transcript="Синтетическая защищённая расшифровка",expires_at=expiry,idempotency_key=secrets.token_hex(16),security_level="elevated")
         assert phone.get(f"/api/v1/audio/{elevated_voice['content']['voice']['audioId']}").status_code==403
         challenge=phone.post(f"/api/v1/notifications/{elevated_voice['id']}/audio-challenge");challenge.raise_for_status();challenge=challenge.json()
         signature=key.sign(base64.b64decode(challenge["payload"]),ec.ECDSA(hashes.SHA256()))
@@ -207,3 +207,4 @@ finally:
     try:process.wait(timeout=10)
     except subprocess.TimeoutExpired:process.kill();process.wait()
     log.close()
+

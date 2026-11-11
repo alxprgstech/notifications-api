@@ -1,5 +1,22 @@
 # Приёмка 0.5.0
 
+## Code Mode, Home Assistant и Asterisk
+
+- Серверный прогон на SQLite прошёл 101 тест. После правок SIP-handshake и обработки одновременного запуска отдельно прошли проверки очереди медиа, маршрута Asterisk с задержкой и двустороннего разговора. Установленный wheel прошёл 16 тестов. Harness прошёл 30 тестов.
+- Worker через локальный Wrangler выполнил программы на синтетическом API. Проверены scopes, отказ записи через read-only маршрут и блокировка прямого доступа к сети. Docker Worker также выполнил тестовую программу через HTTPS действующего Notify. Клиент Harness прошёл этот сценарий. Codex обнаружил MCP-инструмент, и вызов остановился на политике approval never.
+- Home Assistant загрузил компонент на Debian 13. В установленном контейнере проверены запрос с маршрутом Asterisk, сохранение ключа идемпотентности и отказ доступа. В веб-тесте проверены обе кнопки документации.
+- Локальный Notify обновлён на прежнем томе, SQLite-копия прошла quick_check, HTTPS readiness и STT прошли проверку. На GXP1400 проверена односторонняя озвучка через Notify: получен статус playback_sent, владелец услышал всю фразу. В живом двустороннем тесте GXP1400 владелец произнёс две последовательные реплики и услышал оба ответа привязанной тестовой сессии до окончания второй фразы. Для живой проверки Android и действия Home Assistant нужен отдельный вызов.
+
+
+## Дополнение 0.6.0 (локальная проверка)
+
+- Сервер: `dotnet restore Notify.sln --locked-mode` и `dotnet test Notify.sln --no-restore -c Release` — **98/98 PASS** на настоящей SQLite. Покрыты conversation-цикл с fake STT/Silero, `start_conversation`/`speak_call`, `playback_sent` до закрытия медиа, защита расшифровки в SQLite, запрет нового WAV без `voiceTranscript`, новые IPv6-диапазоны webhook и CSRF для DELETE.
+- Образ `alxprgs-notify:merge-readiness` собран на runtime 10.0.14; в изолированном контейнере `127.0.0.1:18085` проверены `/health/live`, `/api/config` (`version=0.6.0`, `voiceText=true`, `conversation=false` без STT).
+- Реальный Vosk `vosk-model-small-ru-0.22` в изолированном контейнере: синтетическая русская фраза, синтезированная Silero, распознана дословно; один запрос ≈1,6 с на Docker Desktop. Это проверка модели/сервиса, не телефона.
+- Harness: `npm run verify` — **28/28 PASS**; добавлен server-Silero путь и регрессия гонки `call.ended` после media close.
+- Веб: production build и UI Playwright PASS; в истории звонков отображается защищённая расшифровка.
+- Android: `assembleDebug`, `assembleRelease`, `assembleDebugAndroidTest`, `testDebugUnitTest` PASS; Biometric обновлён до 1.4.0-beta01. Физическая проверка Redmi не выполнялась.
+
 ## OAuth для ChatGPT на домене Notify и локальный Silero
 
 - Release-сборка и 85 серверных тестов Notify прошли на SQLite. Браузерные тесты кабинета проверили создание подключения, выдачу OAuth-реквизитов, сохранение callback и отключение.

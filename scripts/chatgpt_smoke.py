@@ -445,6 +445,9 @@ def smoke(directory, silero):
             "get_request": "requests:read", "wait_for_response": "requests:read",
             "cancel_request": "requests:cancel",
             "start_call": "calls:start",
+            "start_conversation": "calls:start",
+            "get_call_transcript": "calls:start",
+            "speak_call": "calls:start",
         }
         dial = {"title": "Тест звонка", "text": "Проверка звонка.", "idempotencyKey": secrets.token_hex(16)}
         call(adapter, restricted, "start_call", dial, error="insufficient_scope")

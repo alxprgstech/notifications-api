@@ -52,6 +52,27 @@ def cancel_request(notification_id: str) -> dict:
         return api.cancel(notification_id)
 
 
+@server.tool()
+def start_call(title: str, text: str, idempotency_key: str, target: str = "android") -> dict:
+    """Ring the selected phone and speak after the owner answers."""
+    with client() as api:
+        return api.announce_call(title, text, idempotency_key=idempotency_key, target=target)
+
+
+@server.tool()
+def start_conversation(title: str, idempotency_key: str, target: str = "android", session_id: str | None = None) -> dict:
+    """Start a live conversation on Android or Asterisk."""
+    with client() as api:
+        return api.start_conversation(title, idempotency_key=idempotency_key, target=target, session_id=session_id)
+
+
+@server.tool()
+def get_call_status(call_id: str) -> dict:
+    """Read the current state of a call owned by this source."""
+    with client() as api:
+        return api.call_status(call_id)
+
+
 def main() -> None:
     server.run(transport="stdio")
 
