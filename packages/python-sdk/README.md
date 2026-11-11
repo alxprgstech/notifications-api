@@ -23,3 +23,11 @@ from pathlib import Path
 icon_id = await connector.upload_icon(Path("avatar.png").read_bytes())
 await connector.dial_call(title="Тестовый звонок", icon_id=icon_id)
 ```
+
+
+### Call routing
+
+Use target="asterisk" with announce_call(), start_conversation(), or
+AgentConnector.dial_call() to ring the configured SIP phone. Android is the
+default. Use call_status() to check the returned call ID. A retry with the same
+idempotency key and identical arguments returns the same call.

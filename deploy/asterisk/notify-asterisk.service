@@ -1,0 +1,19 @@
+[Unit]
+Description=ALXPRGS Notify Asterisk bridge
+After=asterisk.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/alxprgs-notify/asterisk.env
+ExecStart=/opt/alxprgs-notify/asterisk/venv/bin/python /opt/alxprgs-notify/asterisk/bridge.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

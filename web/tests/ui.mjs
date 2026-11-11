@@ -93,6 +93,7 @@ try {
   const guides = {
     contract: 'Контракт v1', security: 'Безопасность и SSO', operations: 'Установка и эксплуатация',
     home: 'Самостоятельное размещение Notify',
+    integrations: 'Code Mode, Asterisk и Home Assistant',
   };
   for (const [id, name] of Object.entries(guides)) {
     await page.goto(origin + '/docs/guide/' + id);
@@ -100,13 +101,17 @@ try {
     await page.getByRole('navigation', { name: 'Разделы документации' }).waitFor();
     assert.equal(await theme().inputValue(), 'dark');
   }
+  await page.goto(origin + '/docs/guide/integrations');
+  await heading(guides.integrations).waitFor();
+  assert.match(await page.getByRole('link', { name: 'Открыть в HACS' }).getAttribute('href'), /hacs_repository/);
+  assert.match(await page.getByRole('link', { name: 'Добавить интеграцию в Home Assistant' }).getAttribute('href'), /config_flow_start/);
   await page.goto(origin + '/docs/guide/contract');
   await heading(guides.contract).waitFor();
   await shot('docs-guide-dark');
   await page.goto(origin + '/docs/guide/home');
   await heading(guides.home).waitFor();
   assert.equal(await page.getByText(/2026-11-07|Размещение владельца/).count(), 0);
-  assert.equal(await page.getByRole('navigation', { name: 'Разделы документации' }).getByRole('link').count(), 5);
+  assert.equal(await page.getByRole('navigation', { name: 'Разделы документации' }).getByRole('link').count(), 6);
   await shot('docs-home-dark');
   await page.getByRole('link', { name: 'CONTRACT', exact: true }).first().click();
   await heading(guides.contract).waitFor();

@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "alxprgs-notify-codemode",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "worker_loaders": [{"binding": "LOADER"}],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {"NOTIFY_ORIGIN": "http://notify:8080", "NOTIFY_LOCAL": "1"},
+  "observability": {"enabled": false}
+}

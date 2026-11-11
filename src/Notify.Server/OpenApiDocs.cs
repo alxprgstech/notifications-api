@@ -618,6 +618,14 @@ internal static class OpenApiDocs
             RequestBodyKind.Json, "Короткая русская фраза и стабильный ключ повтора.",
             """{"idempotencyKey":"announce-2026-11-09-1","title":"Notify","text":"Проверка завершена."}"""));
 
+        Add("POST", "/api/v1/calls/conversation", new("startConversation", "Звонки", "Начать разговор",
+            "Вызывает Android или Asterisk. Для привязанной сессии укажите sessionId агента.",
+            ApiAuth.Bearer, [Ok<CallViewResponse>("Состояние звонка.", """{"status":"ringing"}"""), Error(403, "Недостаточно прав.", """{"code":"insufficient_scope"}""")],
+            RequestBodyKind.Json, "Параметры разговора.", """{"idempotencyKey":"conversation-1","title":"Notify","target":"asterisk"}"""));
+        Add("POST", "/api/v1/calls/{id}/say", new("speakCall", "Звонки", "Озвучить реплику",
+            "Озвучивает реплику в активном разговоре этого источника.",
+            ApiAuth.Bearer, [Ok<object>("Реплика принята.", """{"ok":true}"""), Error(409, "Звонок ещё не активен.", """{"code":"call_not_ready"}""")],
+            RequestBodyKind.Json, "Текст и ключ идемпотентности.", """{"idempotencyKey":"say-turn-1","text":"Привет"}"""));
         Add("GET", "/api/v1/calls/{id}/transcript", new("getCallTranscript", "Звонки", "Расшифровка разговора",
             "Возвращает упорядоченные реплики участников (`user` — владелец, `agent` — выбранный чат/агент). Доступно участнику звонка: устройству, владельцу-веб-сессии или интеграции-источнику. Текст хранится в SQLite только в защищённом виде и удаляется вместе с 30-дневной историей звонка. `partial=true` означает, что распознавание части реплик завершилось ошибкой; уже полученные реплики остаются доступны, а `error` содержит код. Аудио звонка не сохраняется.",
             ApiAuth.BearerOrWeb, [

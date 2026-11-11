@@ -580,6 +580,45 @@ public sealed class CallTests
     }
 
     [Fact]
+    public async Task AsteriskAnnouncementHasIndependentRouteAndDelay()
+    {
+        using var app = new AppFactory { UseSpeechStub = true, CallAudioStartDelayMs = 150 };
+        var (sourceClient, _) = app.Integration(scopes: ["calls:announce"]);
+        var (bridgeClient, _) = app.Integration(scopes: ["telephony:bridge"]);
+        var (phoneClient, _, phoneKey) = app.Device();
+        using (sourceClient) using (bridgeClient) using (phoneClient) using (phoneKey)
+        {
+            const string route = "/api/v1/calls/announce";
+            var input = new { title = "Notify", text = "Проверка", idempotencyKey = "asterisk-test-1", target = "asterisk" };
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, (await sourceClient.PostAsJsonAsync(route, input)).StatusCode);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var control = await Ws(app, Token(bridgeClient)).ConnectAsync(new Uri("ws://localhost/api/v1/telephony/connect"), deadline.Token);
+            await control.SendAsync(System.Text.Encoding.UTF8.GetBytes("""{"type":"heartbeat"}"""), WebSocketMessageType.Text, true, deadline.Token);
+            Assert.Equal("heartbeat_ack", (await ReceiveJson(control)).GetProperty("type").GetString());
+            var started = await sourceClient.PostAsJsonAsync(route, input);
+            started.EnsureSuccessStatusCode();
+            var state = await started.Content.ReadFromJsonAsync<JsonElement>();
+            var id = state.GetProperty("id").GetString();
+            Assert.Equal("asterisk", state.GetProperty("target").GetString());
+            var invite = await ReceiveJson(control);
+            Assert.Equal(id, invite.GetProperty("callId").GetString());
+            Assert.Equal(HttpStatusCode.NotFound, (await phoneClient.GetAsync("/api/v1/calls/incoming")).StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, (await phoneClient.PostAsJsonAsync($"/api/v1/calls/{id}/accept", new { })).StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, (await sourceClient.PostAsJsonAsync(route, input with { target = "android" })).StatusCode);
+            var repeat = await sourceClient.PostAsJsonAsync(route, input);
+            Assert.Equal(id, (await repeat.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString());
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            using var audio = await Ws(app, Token(bridgeClient)).ConnectAsync(
+                new Uri($"ws://localhost/api/v1/telephony/calls/{id}/audio?inviteId={invite.GetProperty("inviteId").GetString()}"), deadline.Token);
+            Assert.Equal("active", (await ReceiveJson(audio)).GetProperty("status").GetString());
+            var first = await ReceiveAny(audio, deadline.Token);
+            Assert.Equal(WebSocketMessageType.Binary, first.Item1);
+            Assert.True(clock.ElapsedMilliseconds >= 130);
+            Assert.Equal(HttpStatusCode.Forbidden, (await sourceClient.GetAsync($"/api/v1/calls/{id}/transcript")).StatusCode);
+        }
+    }
+
+    [Fact]
     public async Task AnnouncementSendsLastFrameThenEndedBeforeClose()
     {
         using var app = new AppFactory { UseSpeechStub = true };

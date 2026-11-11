@@ -97,8 +97,18 @@ class NotifyClient:
             raise ValueError("Voice text must be 1..1000 characters")
         return self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceText": text, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
 
-    def announce_call(self, title: str, text: str, *, idempotency_key: str) -> dict[str, Any]:
-        return _result(self.http.post("/api/v1/calls/announce", json={"title": title, "text": text, "idempotencyKey": idempotency_key}))
+    def announce_call(self, title: str, text: str, *, idempotency_key: str, target: str = "android") -> dict[str, Any]:
+        return _result(self.http.post("/api/v1/calls/announce", json={"title": title, "text": text, "idempotencyKey": idempotency_key, **({"target": target} if target != "android" else {})}))
+
+    def call_status(self, call_id: str) -> dict[str, Any]:
+        return _result(self.http.get(f"/api/v1/calls/{_id(call_id)}"))
+
+    def start_conversation(self, title: str, *, idempotency_key: str, target: str = "android", session_id: str | None = None) -> dict[str, Any]:
+        payload = {"title": title, "idempotencyKey": idempotency_key, "target": target, "sessionId": session_id}
+        return _result(self.http.post("/api/v1/calls/conversation", json=payload))
+
+    def speak_call(self, call_id: str, text: str, *, idempotency_key: str) -> dict[str, Any]:
+        return _result(self.http.post(f"/api/v1/calls/{_id(call_id)}/say", json={"text": text, "idempotencyKey": idempotency_key}))
 
     def call_transcript(self, call_id: str) -> dict[str, Any]:
         return _result(self.http.get(f"/api/v1/calls/{_id(call_id)}/transcript"))
@@ -181,8 +191,18 @@ class AsyncNotifyClient:
             raise ValueError("Voice text must be 1..1000 characters")
         return await self.create({"kind": "voice", "title": title, "body": body, "expiresAt": expires_at, "securityLevel": security_level, "voiceText": text, "iconId": icon_id, "correlationId": correlation_id}, idempotency_key=idempotency_key)
 
-    async def announce_call(self, title: str, text: str, *, idempotency_key: str) -> dict[str, Any]:
-        return _result(await self.http.post("/api/v1/calls/announce", json={"title": title, "text": text, "idempotencyKey": idempotency_key}))
+    async def announce_call(self, title: str, text: str, *, idempotency_key: str, target: str = "android") -> dict[str, Any]:
+        return _result(await self.http.post("/api/v1/calls/announce", json={"title": title, "text": text, "idempotencyKey": idempotency_key, **({"target": target} if target != "android" else {})}))
+
+    async def call_status(self, call_id: str) -> dict[str, Any]:
+        return _result(await self.http.get(f"/api/v1/calls/{_id(call_id)}"))
+
+    async def start_conversation(self, title: str, *, idempotency_key: str, target: str = "android", session_id: str | None = None) -> dict[str, Any]:
+        payload = {"title": title, "idempotencyKey": idempotency_key, "target": target, "sessionId": session_id}
+        return _result(await self.http.post("/api/v1/calls/conversation", json=payload))
+
+    async def speak_call(self, call_id: str, text: str, *, idempotency_key: str) -> dict[str, Any]:
+        return _result(await self.http.post(f"/api/v1/calls/{_id(call_id)}/say", json={"text": text, "idempotencyKey": idempotency_key}))
 
     async def call_transcript(self, call_id: str) -> dict[str, Any]:
         return _result(await self.http.get(f"/api/v1/calls/{_id(call_id)}/transcript"))

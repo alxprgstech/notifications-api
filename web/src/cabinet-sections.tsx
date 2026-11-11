@@ -312,6 +312,7 @@ export function ManagementDialog({ form, close, submit }: {
 }) {
   const [name, setName] = useState('');
   const [webhook, setWebhook] = useState('');
+  const [sourceType, setSourceType] = useState('default');
   const [selected, setSelected] = useState(['text_tasks']);
   if (form.kind === 'revoke-source' || form.kind === 'revoke-device') {
     const source = form.kind === 'revoke-source';
@@ -330,7 +331,7 @@ export function ManagementDialog({ form, close, submit }: {
     <form className="management-form" onSubmit={event => {
       event.preventDefault();
       if (!name.trim()) return;
-      if (form.kind === 'create') submit({ action: 'integration.create', name: name.trim(), scopes: sourceScopes, webhookUrl: webhook.trim() || null });
+      if (form.kind === 'create') submit({ action: 'integration.create', name: name.trim(), scopes: sourceType === 'default' ? sourceScopes : sourceType === 'code' ? [...sourceScopes, 'calls:start'] : [sourceType], webhookUrl: sourceType === 'default' || sourceType === 'code' ? webhook.trim() || null : null });
       if (form.kind === 'agent' && selected.length) submit({ action: 'agent.register', targetId: form.source.id, name: name.trim(), capabilities: selected });
     }}>
       {form.kind === 'agent' && <p>Источник <strong>{form.source.name}</strong></p>}
@@ -339,10 +340,18 @@ export function ManagementDialog({ form, close, submit }: {
           placeholder={creating ? 'Например, мониторинг' : 'Например, рабочий компьютер'} />
       </label>
       {creating ? <>
-        <label className="field"><span>Webhook <small>Необязательно</small></span>
-          <input value={webhook} onChange={event => setWebhook(event.target.value)} type="url" placeholder="https://service.example/notify" />
+        <label className="field">Права источника
+          <select value={sourceType} onChange={event => setSourceType(event.target.value)}>
+            <option value="default">Сообщения, запросы и подключение агента</option>
+            <option value="code">Агентские операции и звонки Code Mode</option>
+            <option value="calls:announce">Home Assistant · звонки с озвучкой</option>
+            <option value="telephony:bridge">Мост Asterisk</option>
+          </select>
         </label>
-        <p>Источник сможет отправлять сообщения, запрашивать подтверждения и формы, управлять своими запросами, загружать иконки и подключать агента. Токен действует 90 дней.</p>
+        {(sourceType === 'default' || sourceType === 'code') && <label className="field"><span>Webhook <small>Необязательно</small></span>
+          <input value={webhook} onChange={event => setWebhook(event.target.value)} type="url" placeholder="https://service.example/notify" />
+        </label>}
+        <p>Токен действует 90 дней.</p>
       </> : <fieldset><legend>Возможности агента</legend>
         {Object.entries(capabilities).map(([id, label]) => <label className="checkbox" key={id}>
           <input type="checkbox" checked={selected.includes(id)}

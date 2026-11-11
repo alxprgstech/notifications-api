@@ -188,7 +188,26 @@ api.MapGet("/voice-messages/{id}", (string id, HttpContext c, NotificationServic
 api.MapDelete("/voice-messages/{id}", (string id, HttpContext c, NotificationService service) => { service.DeleteVoice(Auth.Actor(c), id); return Results.NoContent(); });
 api.MapPost("/calls/challenge", (CallChallengeInput input, HttpContext c, CallService calls) => calls.Challenge(Auth.Actor(c), input));
 api.MapPost("/calls/announce", async (CallPlaybackInput input, HttpContext c, ChatGptCall calls, CancellationToken ct) =>
-    await calls.StartRest(Auth.Actor(c), input.Title, input.Text, input.IdempotencyKey, ct));
+    await calls.StartRest(Auth.Actor(c), input.Title, input.Text, input.IdempotencyKey, ct, input.Target));
+api.MapPost("/calls/conversation", (CallConversationInput input, HttpContext c, ChatGptCall calls, CancellationToken ct) =>
+    ChatGptCall.RestAsync(() => calls.StartConversation(Auth.Actor(c), input.Title, input.IdempotencyKey, ct, input.Target, input.SessionId)));
+api.MapPost("/calls/{id}/say", (string id, CallSpeakInput input, HttpContext c, ChatGptCall calls) =>
+    ChatGptCall.RestAsync(() => Task.FromResult(calls.Speak(Auth.Actor(c), id, input.Text, input.IdempotencyKey))));
+api.Map("/telephony/connect", async (HttpContext c, CallService calls, CancellationToken ct) =>
+{
+    var actor = Auth.Actor(c);
+    actor.RequireScope(CallService.BridgeScope);
+    if (!c.WebSockets.IsWebSocketRequest) throw new Fault(400, "websocket_required");
+    using var socket = await c.WebSockets.AcceptWebSocketAsync();
+    await calls.RunBridgeAsync(actor, socket, ct);
+}).ExcludeFromDescription();
+api.Map("/telephony/calls/{id}/audio", async (string id, string inviteId, HttpContext c, CallService calls, CancellationToken ct) =>
+{
+    var actor = Auth.Actor(c);
+    actor.RequireScope(CallService.BridgeScope);
+    if (!c.WebSockets.IsWebSocketRequest) throw new Fault(400, "websocket_required");
+    await calls.AttachBridgeAsync(actor, id, inviteId, () => c.WebSockets.AcceptWebSocketAsync(), ct);
+}).ExcludeFromDescription();
 api.MapPost("/calls", async (CallStart input, HttpContext c, CallService calls, CancellationToken ct) => await calls.StartAsync(Auth.Actor(c), input, ct));
 api.MapGet("/calls", (HttpContext c, CallService calls) => calls.History(Auth.Actor(c)));
 api.MapGet("/calls/incoming", (HttpContext c, CallService calls) => calls.Incoming(Auth.Actor(c)));
@@ -328,16 +347,16 @@ public sealed class NotifyTools(NotificationService service, IHttpContextAccesso
             ? voice.Send(Actor, title, text, expiresAt, idempotencyKey, cancellationToken)
             : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Ring the owner's Android phone for a two-way Russian conversation. The server recognizes the owner's speech locally; call get_call_transcript to read new turns and speak_call to answer. The phone must be accepted manually. Repeat with the same idempotency key to check the same ringing call.")]
-    public Task<string> StartConversation(string title, string idempotencyKey, CancellationToken cancellationToken) =>
-        IsChatGpt ? calls.StartConversation(Actor, title, idempotencyKey, cancellationToken) : throw new Fault(404, "unknown_tool");
+    public Task<string> StartConversation(string title, string idempotencyKey, CancellationToken cancellationToken, string target = "android") =>
+        IsChatGpt ? calls.StartConversation(Actor, title, idempotencyKey, cancellationToken, target) : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Read the ordered transcript of a ChatGPT conversation call. Audio is never stored; only encrypted text is retained with the call history. partial=true means some speech was not recognized, while received turns remain available.")]
     public string GetCallTranscript(string callId) => IsChatGpt ? calls.Transcript(Actor, callId) : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Speak one Russian reply into an active conversation call using the server-side Silero. Reuse the same idempotency key on retry. This does not create a new call.")]
     public string SpeakCall(string callId, string text, string idempotencyKey) =>
         IsChatGpt ? calls.Speak(Actor, callId, text, idempotencyKey) : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Ring the owner's Android phone. If accepted, read up to 300 characters of Russian text aloud using Silero and hang up. The initial result is a call state, not proof of acceptance or playback. Repeat the same arguments and idempotency key to check status without redialing.")]
-    public Task<string> StartCall(string title, string text, string idempotencyKey, CancellationToken cancellationToken) =>
-        IsChatGpt ? calls.Start(Actor, title, text, idempotencyKey, cancellationToken) : throw new Fault(404, "unknown_tool");
+    public Task<string> StartCall(string title, string text, string idempotencyKey, CancellationToken cancellationToken, string target = "android") =>
+        IsChatGpt ? calls.Start(Actor, title, text, idempotencyKey, cancellationToken, target) : throw new Fault(404, "unknown_tool");
     [McpServerTool, System.ComponentModel.Description("Send an informational notification. Requires an idempotency key. Does not request approval.")]
     public string SendNotification(string title, string body, string idempotencyKey, string? iconId = null, string? correlationId = null) =>
         Run(() => service.Create(Actor, new CreateNotification("message", title, body, IconId: iconId, CorrelationId: correlationId), idempotencyKey));

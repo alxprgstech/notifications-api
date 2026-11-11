@@ -29,6 +29,7 @@ public sealed class AppFactory : WebApplicationFactory<Program>
     public int AudioMessageTtlDays { get; set; } = 7;
     public int CallRingSeconds { get; set; } = 45;
     public int CallMediaConnectSeconds { get; set; } = 10;
+    public int CallAudioStartDelayMs { get; set; }
     public int CallQueueFrames { get; set; } = 100;
     public IPushSender? PushSender { get; set; }
     public bool UseSpeechStub { get; set; }
@@ -48,7 +49,7 @@ public sealed class AppFactory : WebApplicationFactory<Program>
         }));
         builder.ConfigureServices(services =>
         {
-            services.RemoveAll<Settings>(); services.AddSingleton(new Settings { DataPath = Root, PublicUrl = "https://localhost", OwnerSub = Owner, WebClientSecret = "synthetic-client-secret-not-a-real-credential", SsoIssuer = Issuer, TrustedProxyNetwork = TrustedProxyNetwork, WebhookHosts = ["fixture.test"], SourceDailyLimit = DailyLimit, AgentHeartbeatSeconds = AgentHeartbeatSeconds, AgentOfflineSeconds = AgentOfflineSeconds, AgentSendTimeoutSeconds = AgentSendTimeoutSeconds, AudioQuotaBytes = AudioQuotaBytes, AudioMessageTtlDays = AudioMessageTtlDays, CallRingSeconds = CallRingSeconds, CallMediaConnectSeconds = CallMediaConnectSeconds, CallQueueFrames = CallQueueFrames, SttUrl = UseSpeechStub ? "http://stt:8080" : "", SileroUrl = "http://silero:8080" });
+            services.RemoveAll<Settings>(); services.AddSingleton(new Settings { DataPath = Root, PublicUrl = "https://localhost", OwnerSub = Owner, WebClientSecret = "synthetic-client-secret-not-a-real-credential", SsoIssuer = Issuer, TrustedProxyNetwork = TrustedProxyNetwork, WebhookHosts = ["fixture.test"], SourceDailyLimit = DailyLimit, AgentHeartbeatSeconds = AgentHeartbeatSeconds, AgentOfflineSeconds = AgentOfflineSeconds, AgentSendTimeoutSeconds = AgentSendTimeoutSeconds, AudioQuotaBytes = AudioQuotaBytes, AudioMessageTtlDays = AudioMessageTtlDays, CallRingSeconds = CallRingSeconds, CallMediaConnectSeconds = CallMediaConnectSeconds, CallQueueFrames = CallQueueFrames, CallAudioStartDelayMs = CallAudioStartDelayMs, SttUrl = UseSpeechStub ? "http://stt:8080" : "", SileroUrl = "http://silero:8080" });
             if (UseSpeechStub) { services.RemoveAll<IHttpClientFactory>(); services.AddSingleton<IHttpClientFactory>(Speech); }
             foreach (var registration in services.Where(d => d.ImplementationType == typeof(DeliveryWorker)).ToList()) services.Remove(registration);
             if (PushSender != null) { services.RemoveAll<IPushSender>(); services.AddSingleton(PushSender); }

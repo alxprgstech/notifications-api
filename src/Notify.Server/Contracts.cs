@@ -45,14 +45,16 @@ public sealed record StepUpState(string Id, string Kind, string TargetId, string
 public sealed record Agent(string Id, string SourceId, string Name, string[] Capabilities, long CreatedAt, long? LastSeenAt = null, bool Revoked = false, string[]? CallProtocols = null, string? CallProtocol = null);
 public sealed record AgentSession(string Id, string Name);
 public sealed record CallStart(string SourceId, string? SessionId = null, string SecurityLevel = "standard", string? ChallengeId = null, string? Signature = null, string Mode = "one_shot");
-public sealed record CallPlaybackInput(string IdempotencyKey, string Title, string Text, string? IconId = null);
+public sealed record CallPlaybackInput(string IdempotencyKey, string Title, string Text, string? IconId = null, string Target = "android");
+public sealed record CallConversationInput(string IdempotencyKey, string Title, string Target = "android", string? SessionId = null);
+public sealed record CallSpeakInput(string IdempotencyKey, string Text);
 public sealed record CallChallengeInput(string SourceId, string? SessionId = null, string SecurityLevel = "standard");
 public sealed record CallAcceptInput(string? ChallengeId = null, string? Signature = null);
 public sealed record CallChallenge(string Id, string DeviceId, string Payload, long ExpiresAt);
 public sealed record CallChallengeProof(string Protocol, string ChallengeId, string DeviceId, string Direction, string Action, string SourceId, string AgentId, string? SessionId, string? CallId, string? InviteId, string SecurityLevel, string Nonce, long ExpiresAt);
 public sealed record CallTurn(string Id, string Speaker, string Text, long At, bool Final = true, string? Status = null, string? Error = null);
 public sealed record CallTranscript(string CallId, string ProtectedTurns, bool Partial, string? Error, long UpdatedAt);
-public sealed record CallRecord(string Id, string SourceId, string AgentId, string? DeviceId, string? SessionId, string SecurityLevel, long StartedAt, long EndedAt, string Status, string? Reason, int DurationMs, string Direction = "outgoing", bool HasTranscript = false, bool TranscriptPartial = false);
+public sealed record CallRecord(string Id, string SourceId, string AgentId, string? DeviceId, string? SessionId, string SecurityLevel, long StartedAt, long EndedAt, string Status, string? Reason, int DurationMs, string Direction = "outgoing", bool HasTranscript = false, bool TranscriptPartial = false, string Target = "android");
 public sealed record AgentCommand(string Id, string AgentId, string SourceId, string Type, string Payload, long CreatedAt, long ExpiresAt, string Status = "queued", int Attempts = 0, long? AckedAt = null, string? CorrelationId = null, string? SessionId = null);
 public sealed record ManagementInput(string Action, string? Name = null, string? TargetId = null, string[]? Scopes = null, string? Preview = null, string? IconId = null, string? WebhookUrl = null, string[]? Capabilities = null, long? ExpectedRevision = null);
 public sealed record Management(string Id, string SessionId, ManagementInput Input, long ExpiresAt, string Status = "pending", string? ProtectedResult = null);
@@ -98,6 +100,7 @@ public sealed class Settings
     public int CallMaxMinutes { get; init; } = 30;
     public int CallMediaConnectSeconds { get; init; } = 10;
     public int CallQueueFrames { get; init; } = 100;
+    public int CallAudioStartDelayMs { get; init; } = 3000;
     public bool SsoConfigured => Guid.TryParse(OwnerSub, out _) && WebClientSecret.Length >= 16;
     public void Validate(bool development)
     {
@@ -115,6 +118,7 @@ public sealed class Settings
         if (SourceDailyLimit is < 1 or > 100000) throw new InvalidOperationException("Invalid SourceDailyLimit");
         if (AgentHeartbeatSeconds is < 1 or > 60 || AgentOfflineSeconds < AgentHeartbeatSeconds * 2 || AgentOfflineSeconds > 600 || AgentSendTimeoutSeconds is < 1 or > 30) throw new InvalidOperationException("Invalid agent heartbeat/offline limits");
         if (AudioQuotaBytes is < 1L * 1024 * 1024 or > 50L * 1024 * 1024 * 1024 || AudioUploadMinutes is < 1 or > 60 || AudioMessageTtlDays is < 1 or > 30) throw new InvalidOperationException("Invalid audio quota/upload/retention limits");
+        if (CallAudioStartDelayMs is < 0 or > 10000) throw new InvalidOperationException("Invalid call audio start delay");
         if (CallRingSeconds is < 1 or > 120 || CallMaxMinutes is < 1 or > 120 || CallMediaConnectSeconds is < 1 or > 60 || CallQueueFrames is < 1 or > 200) throw new InvalidOperationException("Invalid call limits");
         if (ConversationUtteranceSeconds is < 3 or > 30 || ConversationSilenceMilliseconds is < 300 or > 2000) throw new InvalidOperationException("Invalid conversation limits");
         if (!string.IsNullOrEmpty(SttUrl) && (!Uri.TryCreate(SttUrl, UriKind.Absolute, out var stt) || stt.Scheme is not ("http" or "https") || stt.UserInfo.Length != 0 || stt.Query.Length != 0 || stt.Fragment.Length != 0)) throw new InvalidOperationException("SttUrl must be an HTTP(S) base URL without credentials or query");

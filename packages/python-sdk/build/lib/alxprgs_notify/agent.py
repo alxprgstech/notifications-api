@@ -300,12 +300,14 @@ class AgentConnector:
         async with AsyncNotifyClient(self._base, self._token) as client:
             return await client.upload_icon(data)
 
-    async def dial_call(self, session_id: str | None = None, security_level: str = "standard", title: str | None = None, timeout: float = 10, *, icon_id: str | None = None, mode: str = "one_shot") -> dict[str, Any]:
+    async def dial_call(self, session_id: str | None = None, security_level: str = "standard", title: str | None = None, timeout: float = 10, *, icon_id: str | None = None, mode: str = "one_shot", target: str = "android") -> dict[str, Any]:
         """Ask the server to ring the owner. Does not open a microphone."""
         if self._call_protocol != CALL_PROTOCOL:
             raise NotifyCallError("call_protocol_unsupported")
         if security_level not in ("standard", "elevated"):
             raise ValueError("security_level must be standard or elevated")
+        if target not in ("android", "asterisk") or (target == "asterisk" and security_level != "standard"):
+            raise ValueError("Invalid call target or security level for target")
         if mode not in ("one_shot", "conversation"):
             raise ValueError("mode must be one_shot or conversation")
         if session_id is not None and (not isinstance(session_id, str) or len(session_id) > 64):
@@ -321,6 +323,8 @@ class AgentConnector:
             payload: dict[str, Any] = {"securityLevel": security_level, "mode": mode}
             if session_id is not None: payload["sessionId"] = session_id
             if title is not None: payload["title"] = title
+            if target != "android":
+                payload["target"] = target
             if icon_id is not None: payload["iconId"] = icon_id
             await self._send_call("call.dial", payload, event_id=request_id)
             result = await asyncio.wait_for(waiter, timeout)

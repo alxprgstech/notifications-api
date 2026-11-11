@@ -9,6 +9,7 @@
 - [Безопасность и SSO](docs/SECURITY.md) — вход, роли, elevated-ответы и границы доверия.
 - [Установка и эксплуатация](docs/OPERATIONS.md) — Docker/nginx, SSO, backup, обновление.
 - [Самостоятельное размещение](docs/HOME_HOSTING.md) — воспроизводимая установка с Caddy.
+- [Code Mode, Asterisk и Home Assistant](docs/INTEGRATIONS.md) — настройка, маршрутизация и примеры.
 - [Приватный MCP-плагин для ChatGPT](docs/CHATGPT_MCP.md) — подключение из кабинета Notify и локальный голос Silero.
 - [Статус F-01–F-10](docs/SECURITY_AUDIT_STATUS.md) — исправления, усиление и физические ограничения.
 - [Исторический журнал приёмки](docs/ACCEPTANCE.md) — что проверено локально и что требует внешней настройки; это не руководство по развёртыванию.

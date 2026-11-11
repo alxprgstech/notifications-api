@@ -32,7 +32,7 @@ public sealed record AudioGrantResponse(string Grant, long ExpiresAt, string? Tr
 public sealed record CallChallengeResponse(string Id, string Payload, long ExpiresAt);
 public sealed record CallViewResponse(string Id, string InviteId, string Direction, string Status, string? Reason, string SourceId, string AgentId,
     string AgentName, string? SessionId, string SecurityLevel, string? DeviceId, long StartedAt, long? ActiveAt, long? EndedAt,
-    string Title, string? IconId, string Mode, bool HasTranscript, long ExpiresAt);
+    string Title, string? IconId, string Mode, bool HasTranscript, long ExpiresAt, string Target = "android");
 public sealed record CallTranscriptResponse(string CallId, IReadOnlyList<CallTurn> Turns, bool Partial, string? Error, long UpdatedAt);
 public sealed record AgentViewResponse(string Id, string SourceId, string Name, string[] Capabilities, string[] CallProtocols, string? CallProtocol,
     bool Revoked, bool Online, long? LastSeenAt, AgentSession[] Sessions);

@@ -244,6 +244,10 @@ HTTP endpoint `/mcp`, тот же токен интеграции. Инстру�
 
 Остановленного агента сервис сам не возобновляет. Среда агента должна ждать/опрашивать состояние либо принимать webhook. Skill находится в `skills/alxprgs-notify`; глобальная установка не требуется.
 
+## Маршруты звонков
+
+В `calls/announce`, `calls/conversation` и `call.dial` поле `target` принимает `android` (по умолчанию) или `asterisk`. Elevated доступен через Android. Для запуска озвучки без агента используйте `calls:announce` или `calls:start`. `POST /api/v1/calls/conversation` принимает `title`, `idempotencyKey` и необязательный `sessionId`. Для привязанной сессии требуется `agents:connect`, для обычного разговора — `calls:start`. `POST /api/v1/calls/{id}/say` принимает `text` и `idempotencyKey` для разговора с `calls:start`. См. [настройку интеграций](INTEGRATIONS.md).
+
 ## Связанные руководства
 
 - [Безопасность и SSO](SECURITY.md) — доверие, привязка, elevated, веб-кабинет.

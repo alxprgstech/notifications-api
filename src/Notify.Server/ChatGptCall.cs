@@ -9,6 +9,7 @@ internal sealed record ChatGptSayAttempt(string Fingerprint, string CallId, long
 public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech speech)
 {
     internal const string Scope = "calls:start";
+    internal const string AnnounceScope = "calls:announce";
     internal const string AgentScope = "agents:connect";
     internal const string AttemptKind = "chatgpt_call";
     internal const string ConversationAttemptKind = "chatgpt_conversation";
@@ -16,12 +17,12 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
     private const int MaxPcmBytes = 60 * 32000;
     private readonly SemaphoreSlim synthesis = new(1, 1);
 
-    public Task<string> StartConversation(Actor actor, string title, string key, CancellationToken ct)
+    public Task<string> StartConversation(Actor actor, string title, string key, CancellationToken ct, string target = "android", string? sessionId = null)
     {
-        if (actor.Kind != "integration" || !actor.Scopes.Contains(Scope)) throw new McpException("insufficient_scope");
+        if (actor.Kind != "integration" || !actor.Scopes.Contains(sessionId == null ? Scope : AgentScope)) throw new McpException("insufficient_scope");
         if (key.Length is < 8 or > 128 || key.Any(c => c is < '!' or > '~')) throw new McpException("invalid_idempotency_key");
         if (string.IsNullOrWhiteSpace(title) || title.Length > 160 || title.Any(char.IsControl)) throw new McpException("invalid_call");
-        var fingerprint = Wire.Hash(Wire.Encode(new { title, key }));
+        var fingerprint = Wire.Hash(target == "android" && sessionId == null ? Wire.Encode(new { title, key }) : Wire.Encode(new { title, key, target, sessionId }));
         var attemptId = Wire.Hash($"{actor.Id}:{key}");
         var attempt = db.Run((c, t) => Get<ChatGptCallAttempt>(c, t, ConversationAttemptKind, attemptId));
         if (attempt != null)
@@ -31,9 +32,9 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
         }
         try
         {
-            calls.EnsureIdle();
             ct.ThrowIfCancellationRequested();
-            return Task.FromResult(Wire.Encode(calls.StartBotConversation(actor, title, attemptId, fingerprint)));
+            var bound = sessionId == null ? null : ResolveBoundAgent(actor, sessionId);
+            return Task.FromResult(Wire.Encode(calls.StartBotConversation(actor, title, attemptId, fingerprint, target, sessionId, bound)));
         }
         catch (Fault error) { throw new McpException(error.Code); }
     }
@@ -63,17 +64,15 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
         return Wire.Encode(new { ok = true, callId });
     }
 
-    public async Task<string> Start(Actor actor, string title, string text, string key, CancellationToken ct)
+    public async Task<string> Start(Actor actor, string title, string text, string key, CancellationToken ct, string target = "android")
     {
-        if (actor.Kind != "integration" || (!actor.Scopes.Contains(Scope) && !actor.Scopes.Contains(AgentScope)))
+        if (actor.Kind != "integration" || !actor.Scopes.Any(s => s is Scope or AnnounceScope or AgentScope))
             throw new McpException("insufficient_scope");
         if (key.Length is < 8 or > 128 || key.Any(c => c is < '!' or > '~')) throw new McpException("invalid_idempotency_key");
         if (string.IsNullOrWhiteSpace(title) || title.Length > 160 || title.Any(char.IsControl) ||
             string.IsNullOrWhiteSpace(text) || text.Length > 300 || text.Any(c => char.IsControl(c) && c is not ('\n' or '\t' or '\r')))
             throw new McpException("invalid_call");
 
-        var (agentId, agentName) = await ResolveAgent(actor, ct);
-        var fingerprint = Wire.Hash(Wire.Encode(new { title, text, agentId }));
         var attemptId = Wire.Hash($"{actor.Id}:{key}");
         // Hold only during synthesis and publication, never while the phone rings or plays audio.
         await synthesis.WaitAsync(ct);
@@ -82,10 +81,15 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
             var attempt = db.Run((c, t) => Get<ChatGptCallAttempt>(c, t, AttemptKind, attemptId));
             if (attempt != null)
             {
-                if (attempt.Fingerprint != fingerprint) throw new McpException("idempotency_conflict");
+                var recorded = db.Run((c, t) => Get<CallRecord>(c, t, "call", attempt.CallId));
+                var expected = Fingerprint(title, text, recorded?.AgentId == actor.Id ? null : recorded?.AgentId, target);
+                if (attempt.Fingerprint != expected) throw new McpException("idempotency_conflict");
                 return Wire.Encode(calls.State(actor, attempt.CallId));
             }
+            var (agentId, agentName) = ResolveAgent(actor);
+            var fingerprint = Fingerprint(title, text, agentId, target);
             calls.EnsureIdle();
+            calls.EnsureTarget(target);
             var pcm = await speech.WithWav(text, MaxPcmBytes + 4096, async (stream, length, token) =>
             {
                 var wav = new byte[(int)length];
@@ -96,18 +100,21 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
                 return wav.AsMemory(offset, count);
             }, ct);
             ct.ThrowIfCancellationRequested();
-            return Wire.Encode(calls.StartPlayback(actor, title, text, pcm, attemptId, fingerprint, agentId, agentName));
+            return Wire.Encode(calls.StartPlayback(actor, title, text, pcm, attemptId, fingerprint, agentId, agentName, target));
         }
         catch (Fault error) { throw new McpException(error.Code); }
         catch (SpeechException error) { throw new McpException(error.Code); }
         finally { synthesis.Release(); }
     }
 
-    public async Task<object> StartRest(Actor actor, string title, string text, string key, CancellationToken ct)
+    public async Task<object> StartRest(Actor actor, string title, string text, string key, CancellationToken ct, string target = "android") =>
+        await RestAsync(() => Start(actor, title, text, key, ct, target));
+
+    internal static async Task<object> RestAsync(Func<Task<string>> operation)
     {
         try
         {
-            var json = await Start(actor, title, text, key, ct);
+            var json = await operation();
             return Wire.Decode<System.Text.Json.JsonElement>(json);
         }
         catch (McpException error)
@@ -116,16 +123,33 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
             {
                 "insufficient_scope" => 403,
                 "invalid_idempotency_key" or "invalid_call" => 400,
-                "busy" or "idempotency_conflict" or "agent_offline" or "agent_unsupported" or "call_protocol_unsupported" => 409,
-                "silero_unavailable" or "silero_timeout" => 503,
+                "busy" or "idempotency_conflict" or "agent_offline" or "agent_unsupported" or "call_protocol_unsupported" or "call_not_ready" or "agent_not_registered" => 409,
+                "silero_unavailable" or "silero_timeout" or "asterisk_unavailable" or "stt_unavailable" => 503,
+                "call_not_found" => 404,
                 _ => 400,
             }, error.Message);
         }
     }
 
-    private async Task<(string? AgentId, string? AgentName)> ResolveAgent(Actor actor, CancellationToken ct)
+    private static string Fingerprint(string title, string text, string? agentId, string target) =>
+        Wire.Hash(target == "android" ? Wire.Encode(new { title, text, agentId }) : Wire.Encode(new { title, text, agentId, target }));
+
+    private (string? AgentId, string? AgentName) ResolveAgent(Actor actor)
     {
-        if (actor.Scopes.Contains(Scope)) return (null, null);
+        if (actor.Scopes.Contains(Scope) || actor.Scopes.Contains(AnnounceScope)) return (null, null);
+        var online = OnlineAgent(actor);
+        return (online.Agent.Id, online.Agent.Name);
+    }
+
+    private Agent ResolveBoundAgent(Actor actor, string sessionId)
+    {
+        var online = OnlineAgent(actor);
+        if (!online.Sessions.Any(session => session.Id == sessionId)) throw new Fault(400, "invalid_session");
+        return online.Agent;
+    }
+
+    private (Agent Agent, AgentSession[] Sessions) OnlineAgent(Actor actor)
+    {
         var agent = db.Run((c, t) =>
         {
             var source = Get<Source>(c, t, "source", actor.Id) ?? throw new Fault(403, "insufficient_scope");
@@ -135,7 +159,6 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
         var online = calls.AgentOnline(agent.Id) ?? throw new Fault(409, "agent_offline");
         if (!online.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) throw new Fault(409, "agent_unsupported");
         if (online.CallProtocol != CallService.Protocol) throw new Fault(409, "call_protocol_unsupported");
-        await Task.CompletedTask;
-        return (agent.Id, online.Agent.Name);
+        return (online.Agent, online.Sessions);
     }
 }
