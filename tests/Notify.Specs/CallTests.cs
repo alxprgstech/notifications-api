@@ -729,7 +729,7 @@ public sealed class CallTests
     }
 
     [Fact]
-    public async Task ConversationUsesLocalSttSelectedAgentAndServerSilero()
+    public async Task ConversationContinuesThroughDiagnosticsFromSttToAgentReplyAndSilero()
     {
         using var app = new AppFactory { UseSpeechStub = true };
         var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]);
@@ -761,6 +761,16 @@ public sealed class CallTests
             Assert.Equal("dialog.user", dialog.GetProperty("type").GetString());
             Assert.Equal("Проверь сборку", dialog.GetProperty("payload").GetProperty("text").GetString());
             var turnId = dialog.GetProperty("payload").GetProperty("turnId").GetString()!;
+
+            var registration = await sourceClient.GetFromJsonAsync<AgentSelfResponse>("/api/v1/agents/self");
+            Assert.NotNull(registration);
+            Assert.Equal(agent.Id, registration.AgentId);
+            Assert.Equal(source.Id, registration.SourceId);
+            Assert.True(registration.Online);
+            await WaitStatus(phoneClient, callId, "active");
+            await SendText(control, new { type = "heartbeat", protocolVersion = AgentHub.Protocol, eventId = Wire.Id() });
+            Assert.Equal("heartbeat_ack", (await ReceiveJson(control)).GetProperty("type").GetString());
+
             await SendText(control, new { type = "call.say", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId, turnId, text = "Сборка прошла" } });
 
             var sawAgentTranscript = false; var binaryFrames = 0;
