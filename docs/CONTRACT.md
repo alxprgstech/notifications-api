@@ -177,6 +177,8 @@ HTTPS URL задаётся при создании интеграции и до�
 
 ## Агенты
 
+`GET /api/v1/agents/self` возвращает `agentId`, `sourceId`, `name`, `online`, `capabilities`, `callProtocol` и `supportedCallProtocols` для источника bearer-токена с правом `agents:connect`. Ответ имеет `Cache-Control: no-store`. Используйте этот запрос для получения Agent ID и диагностики действующего соединения.
+
 Агент — зарегистрированный endpoint источника, принадлежащего владельцу. Регистрация выполняется в кабинете через `POST /api/v1/management` с `{"action":"agent.register","targetId":"<sourceId>","name":"...","capabilities":["text_tasks","voice_messages","realtime_audio"]}` и подтверждается повышенным ответом телефона. У источника должен быть scope `agents:connect`; на источник можно зарегистрировать одного агента. `GET /api/v1/agents` возвращает зарегистрированных агентов, `online`, `lastSeenAt`, заявленные возможности и текущие задачи.
 
 Агент подключается сам исходящим WebSocket/TLS к `wss://notify.example.com/api/v1/agents/connect` с `Authorization: Bearer <токен источника>`; входящий порт на компьютере агента не открывается. Это не REST-операция: без upgrade сервер отвечает 400 `websocket_required`, а протокол описан ниже. Ошибки доступа: `agents_scope_required`, `agent_not_registered`. Протокол — `alxprgs.notify.agent.v1`, текстовые JSON-кадры до 64 KiB.

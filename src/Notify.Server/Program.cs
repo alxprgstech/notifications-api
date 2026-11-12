@@ -238,6 +238,13 @@ api.MapGet("/notifications/{id}/deliveries", (string id, HttpContext c, Notifica
 api.MapGet("/sync", (long? after, HttpContext c, NotificationService service) => service.Sync(Auth.Actor(c), after ?? 0));
 api.MapGet("/devices", (HttpContext c, NotificationService service) => service.Devices(Auth.Actor(c)));
 api.MapGet("/agents", (HttpContext c, AgentHub hub) => hub.List(Auth.Actor(c)));
+api.MapGet("/agents/self", (HttpContext c, AgentHub hub) =>
+{
+    var actor = Auth.Actor(c);
+    if (actor.Kind != "integration" || !actor.Scopes.Contains("agents:connect")) throw new Fault(403, "agents_scope_required");
+    c.Response.Headers.CacheControl = "no-store";
+    return hub.DescribeSource(actor.Id);
+});
 api.Map("/agents/connect", async (HttpContext c, AgentHub hub, CancellationToken ct) =>
 {
     var actor = Auth.Actor(c);

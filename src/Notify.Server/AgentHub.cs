@@ -9,6 +9,9 @@ namespace Notify;
 
 public sealed class AgentProtocolException(string message) : Exception(message);
 
+public sealed record AgentSelfResponse(string AgentId, string SourceId, string Name, bool Online,
+    string[] Capabilities, string? CallProtocol, string[] SupportedCallProtocols);
+
 // A single-process registry for outbound agent WebSocket sessions. Audio/call media never enters this queue.
 public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> log)
 {
@@ -52,6 +55,13 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         }
     }
     public Agent? ForSource(string sourceId) => db.Run((c, t) => All<Agent>(c, t, "agent").FirstOrDefault(a => a.SourceId == sourceId && !a.Revoked));
+    public AgentSelfResponse DescribeSource(string sourceId)
+    {
+        var agent = ForSource(sourceId) ?? throw new Fault(403, "agent_not_registered");
+        var live = Online(agent.Id);
+        return new(agent.Id, agent.SourceId, agent.Name, live.HasValue, live?.Capabilities ?? agent.Capabilities,
+            live.HasValue ? live.Value.CallProtocol : agent.CallProtocol, CallService.SupportedProtocols);
+    }
     public Agent? Get(string agentId) => db.Run((c, t) => Get<Agent>(c, t, "agent", agentId));
     public List<object> List(Actor actor)
     {
@@ -122,24 +132,41 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
     public async Task Run(Agent agent, WebSocket socket, CancellationToken ct)
     {
         var connection = new Connection(agent, socket);
-        var previous = connections.AddOrUpdate(agent.Id, connection, (_, existing) => { existing.Closing.Cancel(); return connection; });
-        if (!ReferenceEquals(previous, connection)) previous.Closing.Cancel();
+        var registered = false;
         WebSocketCloseStatus? closeStatus = null; string? closeReason = null;
         try
         {
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.Closing.Token);
+            using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+            helloTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+            var hello = await ReceiveFrameAsync(connection, helloTimeout.Token);
+            var name = ApplyHello(connection, hello);
+            if (hello.TryGetProperty("client", out var client) && client.ValueKind == JsonValueKind.String &&
+                client.GetString() == "alxprgs-notify-harness-check")
+                throw new AgentProtocolException("use_agents_self_for_diagnostics");
             db.Run((c, t) =>
             {
                 if (Get<Source>(c, t, "source", agent.SourceId) is not { Revoked: false } source ||
                     !source.Scopes.Contains("agents:connect") || Get<Agent>(c, t, "agent", agent.Id) is not { Revoked: false } stored)
                     throw new AgentProtocolException("agents_scope_required");
-                Put(c, t, "agent", agent.Id, stored with { LastSeenAt = Wire.Now });
+                Put(c, t, "agent", agent.Id, stored with
+                {
+                    Name = name, Capabilities = connection.Capabilities, CallProtocols = connection.CallProtocols,
+                    CallProtocol = connection.CallProtocol, LastSeenAt = Wire.Now
+                });
                 Exec(c, t, "UPDATE agent_commands SET status='queued' WHERE agent_id=$a AND status='sent'", ("$a", agent.Id));
                 return 0;
             });
-            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.Closing.Token);
-            using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); helloTimeout.CancelAfter(TimeSpan.FromSeconds(10));
-            var hello = await ReceiveFrameAsync(connection, helloTimeout.Token);
-            ApplyHello(connection, hello);
+            while (!connections.TryAdd(agent.Id, connection))
+            {
+                if (!connections.TryGetValue(agent.Id, out var existing)) continue;
+                if (connections.TryUpdate(agent.Id, connection, existing))
+                {
+                    existing.Closing.Cancel();
+                    break;
+                }
+            }
+            registered = true;
             await SendJsonAsync(connection, new
             {
                 eventId = Wire.Id(), protocolVersion = Protocol, type = "hello_ack", serverTime = Wire.Now,
@@ -164,9 +191,11 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         {
             connection.Closing.Cancel();
             // Compare and remove atomically: a replacement must survive this connection's cleanup.
-            connections.TryRemove(new KeyValuePair<string, Connection>(agent.Id, connection));
-            db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { LastSeenAt = Wire.Now }); return 0; });
-            if (DisconnectedEvent is { } disconnected) { try { await disconnected(agent); } catch { } }
+            if (registered && connections.TryRemove(new KeyValuePair<string, Connection>(agent.Id, connection)))
+            {
+                db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { LastSeenAt = Wire.Now }); return 0; });
+            }
+            if (registered && DisconnectedEvent is { } disconnected) { try { await disconnected(agent); } catch { } }
             try
             {
                 using var closeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -178,7 +207,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         }
     }
 
-    private void ApplyHello(Connection connection, JsonElement hello)
+    private string ApplyHello(Connection connection, JsonElement hello)
     {
         if (Text(hello, "type", 32) != "hello") throw new AgentProtocolException("hello_required");
         if (Text(hello, "protocolVersion", 64) != Protocol) throw new AgentProtocolException("unsupported_protocol");
@@ -192,7 +221,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         var sessions = Sessions(hello);
         connection.Capabilities = capabilities; connection.Sessions = sessions; connection.CallProtocols = callProtocols;
         connection.CallProtocol = callProtocols.FirstOrDefault(protocol => CallService.SupportedProtocols.Contains(protocol, StringComparer.Ordinal));
-        db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", connection.Agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { Name = name, Capabilities = capabilities, CallProtocols = callProtocols, CallProtocol = connection.CallProtocol, LastSeenAt = Wire.Now }); return 0; });
+        return name;
     }
 
     private async Task ReadLoopAsync(Connection connection, CancellationToken ct)

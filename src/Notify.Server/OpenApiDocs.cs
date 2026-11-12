@@ -800,6 +800,14 @@ internal static class OpenApiDocs
                 Error(403, "Интеграции недоступно (`owner_required`).", """{"code":"owner_required"}"""),
                 RateLimited, InternalError]));
 
+        Add("GET", "/api/v1/agents/self", new("getSourceAgent", "Управление", "Агент текущего источника",
+            "Токен интеграции с правом `agents:connect` определяет источник. Запрос возвращает регистрацию и текущее состояние без открытия WebSocket.",
+            ApiAuth.Bearer, [
+                Ok<AgentSelfResponse>("Регистрация агента.", """{"agentId":"ffffffffffffffffffffffffffffffff","sourceId":"abcdef0123456789abcdef0123456789","name":"Мой компьютер","online":false,"capabilities":["realtime_audio"],"callProtocol":null,"supportedCallProtocols":["alxprgs.notify.call.v2"]}"""),
+                Unauthorized,
+                Error(403, "Требуется `agents:connect` и зарегистрированный агент.", """{"code":"agent_not_registered"}"""),
+                RateLimited, InternalError]));
+
         Add("GET", "/api/v1/sources", new("listSources", "Управление", "Источники и их права",
             "Владелец видит все источники, интеграция с `requests:read` — только себя. `protectedWebhookSecret` никогда не возвращается; webhook secret показывается один раз при создании интеграции.",
             ApiAuth.BearerOrWeb, [

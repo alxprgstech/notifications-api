@@ -89,6 +89,53 @@ public sealed class AgentTests
     }
 
     [Fact]
+    public async Task SourceDiagnosticsAndLegacyProbeLeaveLiveConnectionIntact()
+    {
+        using var app = new AppFactory();
+        var (sourceClient, source) = app.Integration(scopes: ["agents:connect"]);
+        var (other, _) = app.Integration(scopes: ["agents:connect"]);
+        var (unscoped, _) = app.Integration(scopes: ["notify:send"]);
+        using var sourceHttp = sourceClient;
+        using var otherHttp = other;
+        using var unscopedHttp = unscoped;
+        var agent = Register(app, source.Id);
+        var hub = app.Services.GetRequiredService<AgentHub>();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var address = new Uri("ws://localhost/api/v1/agents/connect");
+        object Hello(string client) => new
+        {
+            type = "hello", protocolVersion = AgentHub.Protocol, eventId = Wire.Id(), agentId = agent.Id,
+            name = "Runtime", capabilities = new[] { "text_tasks" }, client
+        };
+        using var active = await Client(app, Token(sourceClient)).ConnectAsync(address, timeout.Token);
+        await Send(active, Hello("runtime"));
+        Assert.Equal("hello_ack", (await Receive(active, timeout.Token)).GetProperty("type").GetString());
+        var disconnects = 0;
+        hub.DisconnectedEvent = _ => { Interlocked.Increment(ref disconnects); return Task.CompletedTask; };
+
+        var registration = await sourceClient.GetFromJsonAsync<AgentSelfResponse>("/api/v1/agents/self", timeout.Token);
+        Assert.NotNull(registration);
+        Assert.Equal(agent.Id, registration.AgentId);
+        Assert.Equal(source.Id, registration.SourceId);
+        Assert.True(registration.Online);
+        using var foreign = await other.GetAsync("/api/v1/agents/self", timeout.Token);
+        using var forbidden = await unscoped.GetAsync("/api/v1/agents/self", timeout.Token);
+        Assert.Equal(HttpStatusCode.Forbidden, foreign.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+
+        using var probe = await Client(app, Token(sourceClient)).ConnectAsync(address, timeout.Token);
+        await Send(probe, Hello("alxprgs-notify-harness-check"));
+        var close = await ReceiveClose(probe, timeout.Token);
+        Assert.Equal("use_agents_self_for_diagnostics", close.CloseStatusDescription);
+        await probe.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", timeout.Token);
+        await Send(active, new { type = "heartbeat", protocolVersion = AgentHub.Protocol, eventId = Wire.Id() });
+        Assert.Equal("heartbeat_ack", (await Receive(active, timeout.Token)).GetProperty("type").GetString());
+        Assert.Equal(0, Volatile.Read(ref disconnects));
+        Assert.True(hub.IsOnline(agent.Id));
+        await active.CloseAsync(WebSocketCloseStatus.NormalClosure, "", timeout.Token);
+    }
+
+    [Fact]
     public async Task WebSocketRequiresScopeRegisteredAgentAndProtocol()
     {
         using var app = new AppFactory(); var (noScope, _) = app.Integration(scopes: ["notify:send"]); var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]); using (noScope) using (sourceClient)

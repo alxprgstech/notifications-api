@@ -187,6 +187,18 @@ export function EventDetail({ preview, full, sources, error, retry, close }: {
   </Dialog>;
 }
 
+function CopyId({ label, value }: { label: string; value: string }) {
+  const [feedback, setFeedback] = useState('');
+  return <div className="entity-controls">
+    <div><strong>{label}</strong><p><code>{value}</code></p></div>
+    <button className="button secondary" aria-label={`Скопировать ${label}`} onClick={async () => {
+      try { await navigator.clipboard.writeText(value); setFeedback(`Скопирован ${label}`); }
+      catch { setFeedback('Копирование недоступно. Выделите значение вручную.'); }
+    }}><Icon name="copy" size={16} /> Скопировать</button>
+    {feedback && <small role="status">{feedback}</small>}
+  </div>;
+}
+
 export function Integrations({ sources, agents, busy, open, manage, blocked }: {
   sources: Source[]; agents: Agent[]; busy: boolean; open: (form: ManagementForm) => void;
   manage: (input: ManagementInput) => void; blocked: boolean;
@@ -200,9 +212,10 @@ export function Integrations({ sources, agents, busy, open, manage, blocked }: {
     return <section className="panel entity-card" key={source.id}>
       <div className="entity-header">
         <span className="entity-icon accent"><Icon name="link" /></span>
-        <div className="entity-main"><h2>{source.name}</h2><code>{source.id}</code></div>
+        <div className="entity-main"><h2>{source.name}</h2></div>
         <Badge tone={source.revoked ? 'neutral' : 'success'}>{source.revoked ? 'Доступ отозван' : 'Активен'}</Badge>
       </div>
+      <CopyId label="Source ID" value={source.id} />
       {!source.revoked && <>
         {source.canEditPermissions && <div className="entity-controls">
           <div><strong>Права источника</strong><p>{source.scopes.map(scope => sourcePermissionLabels[scope] ?? scope).join(', ') || 'Права не выданы'}</p></div>
@@ -223,6 +236,7 @@ export function Integrations({ sources, agents, busy, open, manage, blocked }: {
             </Badge>}
           </div>
           {agent ? <>
+            <CopyId label="Agent ID" value={agent.id} />
             {!agent.online && !!agent.lastSeenAt && <p>Последнее подключение {dateTime.format(agent.lastSeenAt)}</p>}
             {agent.capabilities.length > 0 && <div className="tags">{agent.capabilities.map(cap => <Badge key={cap}>{capabilities[cap] ?? cap}</Badge>)}</div>}
             {agent.online && agent.sessions.length > 0 && <p>Задачи · {agent.sessions.map(session => session.name).join(', ')}</p>}

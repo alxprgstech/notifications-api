@@ -350,6 +350,11 @@ try {
 
   await page.getByText('На связи', { exact: true }).waitFor();
   await button('Интеграции').click();
+  await button('Скопировать Source ID').first().click();
+  assert.equal(await page.evaluate(() => window.syntheticClipboard), 'fixture');
+  await button('Скопировать Agent ID').click();
+  assert.equal(await page.evaluate(() => window.syntheticClipboard), 'agent1');
+  await page.evaluate(() => { delete window.syntheticClipboard; });
   await shot('integrations-dark');
   await button('Показывать содержание').click();
   await page.getByText('Подтвердите действие на телефоне', { exact: true }).waitFor();
