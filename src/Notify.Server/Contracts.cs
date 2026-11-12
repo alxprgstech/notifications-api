@@ -34,7 +34,7 @@ public sealed record CreateNotification(string Kind, string Title, string Body, 
 public sealed record Answer(string Decision, string? Text = null);
 public sealed record SubmitAnswer(Answer? Answer = null, string? ChallengeId = null, string? Signature = null, FormValues? Form = null);
 public sealed record Notification(string Id, string SourceId, CreateNotification Content, long CreatedAt, string Status, Answer? Answer = null, long? AnsweredAt = null, string? ManagementId = null, bool PreviewOnly = false, FormAnswer? FormAnswer = null);
-public sealed record Source(string Id, string Name, string[] Scopes, string Preview = "hidden", string? IconId = null, string? WebhookUrl = null, string? ProtectedWebhookSecret = null, bool Revoked = false);
+public sealed record Source(string Id, string Name, string[] Scopes, string Preview = "hidden", string? IconId = null, string? WebhookUrl = null, string? ProtectedWebhookSecret = null, bool Revoked = false, long PermissionsRevision = 0);
 public sealed record Device(string Id, string Name, string PublicKey, string? FcmToken = null, bool Revoked = false);
 public sealed record Challenge(string Id, string NotificationId, string DeviceId, string Payload, long ExpiresAt, Answer? Answer = null, FormValues? Form = null, string? AudioId = null);
 public sealed record Delivery(string NotificationId, string DeviceId, string Status, long UpdatedAt);

@@ -1,7 +1,7 @@
 """Expose the Notify call action to Home Assistant."""
 import voluptuous as vol
 from homeassistant.core import SupportsResponse
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -22,6 +22,10 @@ async def async_setup(hass, config):
         try:
             return await call(async_get_clientsession(hass), data["url"], data["token"], service_call.data)
         except NotifyError as error:
+            if str(error) == "unsupported_tts_language":
+                raise ServiceValidationError(
+                    "Notify: Use Russian text for speech. Spell names and abbreviations in Cyrillic."
+                ) from None
             raise HomeAssistantError(f"Notify: {error}") from None
 
     hass.services.async_register(DOMAIN, "call", announce, supports_response=SupportsResponse.OPTIONAL,

@@ -36,7 +36,7 @@ public sealed record CallViewResponse(string Id, string InviteId, string Directi
 public sealed record CallTranscriptResponse(string CallId, IReadOnlyList<CallTurn> Turns, bool Partial, string? Error, long UpdatedAt);
 public sealed record AgentViewResponse(string Id, string SourceId, string Name, string[] Capabilities, string[] CallProtocols, string? CallProtocol,
     bool Revoked, bool Online, long? LastSeenAt, AgentSession[] Sessions);
-public sealed record SourceViewResponse(string Id, string Name, string[] Scopes, string Preview, string? IconId, string? WebhookUrl, bool Revoked);
+public sealed record SourceViewResponse(string Id, string Name, string[] Scopes, string Preview, string? IconId, string? WebhookUrl, bool Revoked, long PermissionsRevision, bool CanEditPermissions);
 public sealed record ManagementStatusResponse(string Id, string Status, JsonElement? Result = null);
 public sealed record IconResponse(string Id);
 public sealed record ErrorResponse(string Code);

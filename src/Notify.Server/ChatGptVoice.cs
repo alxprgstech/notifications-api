@@ -60,9 +60,21 @@ public sealed class ChatGptVoice(Database db, AudioService audio, NotificationSe
 /// <summary>Text-to-Silero for REST, MCP and the SDK. A WAV is streamed, never buffered as a file.</summary>
 public sealed class SileroSpeech(IHttpClientFactory clients)
 {
+    internal const string UnsupportedLanguage = "unsupported_tts_language";
+
+    internal static void ValidateText(string text)
+    {
+        foreach (var rune in text.EnumerateRunes())
+        {
+            if (Rune.IsLetter(rune) && rune.Value is not (>= 'А' and <= 'я' or 'Ё' or 'ё'))
+                throw new SpeechException(UnsupportedLanguage);
+        }
+    }
+
     internal async Task<T> WithWav<T>(string text, long maxBytes,
         Func<Stream, long, CancellationToken, Task<T>> consume, CancellationToken ct)
     {
+        ValidateText(text);
         using var client = clients.CreateClient("silero");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(30));
@@ -135,7 +147,7 @@ public sealed class VoiceService(NotificationService notify, SileroSpeech speech
             uploadId = await speech.WithWav(text, AudioService.MaxBytes,
                 async (stream, length, token) => (await audio.UploadAsync(actor, stream, length, token)).UploadId, ct);
         }
-        catch (SpeechException error) { throw new Fault(503, error.Code); }
+        catch (SpeechException error) { throw new Fault(error.Code == SileroSpeech.UnsupportedLanguage ? 422 : 503, error.Code); }
 
         try
         {
