@@ -40,6 +40,18 @@ public sealed partial class CallService
         lock (sync) ResolveTarget(target);
     }
 
+    internal void DisconnectBridge(string sourceId)
+    {
+        SipPeer peer;
+        lock (sync)
+        {
+            if (sipPeer is not { } current || current.SourceId != sourceId) return;
+            peer = current;
+            sipPeer = null;
+        }
+        peer.Socket.Abort();
+    }
+
     private SipPeer? ResolveTarget(string target) => target switch
     {
         "android" => null,
@@ -72,6 +84,7 @@ public sealed partial class CallService
         }
         try
         {
+            if (!db.Run((c, t) => GetBridgeScope(c, t, actor.Id))) return;
             var buffer = new byte[2048];
             while (!ct.IsCancellationRequested)
             {

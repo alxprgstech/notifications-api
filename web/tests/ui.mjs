@@ -162,8 +162,8 @@ try {
     },
   ];
   const sources = [
-    { id: 'fixture', name: 'Агент разработки', preview: 'hidden', scopes: ['notify:send', 'agents:connect'], revoked: false },
-    { id: 'other', name: 'Мониторинг', preview: 'full', scopes: ['notify:send', 'agents:connect'], revoked: false },
+    { id: 'fixture', name: 'Агент разработки', preview: 'hidden', scopes: ['notify:send', 'agents:connect'], revoked: false, permissionsRevision: 0, canEditPermissions: true },
+    { id: 'other', name: 'Мониторинг', preview: 'full', scopes: ['notify:send', 'agents:connect'], revoked: false, permissionsRevision: 0, canEditPermissions: true },
   ];
   const devices = [{ id: 'phone', name: 'Мой Android', revoked: false }];
   const fixtures = {
@@ -250,6 +250,13 @@ try {
         }
         const status = action === 'device.revoke' ? 'denied' : action === 'integration.revoke' ? 'expired' : 'approved';
         if (action === 'source.update') sources[0].preview = changes.at(-1).preview;
+        if (action === 'integration.permissions.update') {
+          const change = changes.at(-1);
+          const source = sources.find(source => source.id === change.targetId);
+          assert.equal(change.expectedRevision, source.permissionsRevision);
+          source.scopes = change.scopes;
+          source.permissionsRevision++;
+        }
         return await route.fulfill({ json: { status } });
       } finally { activePolls--; }
     }
@@ -387,6 +394,17 @@ try {
   await credentials.waitFor({ state: 'hidden' });
   assert.equal(await page.getByText(fixtureSecret, { exact: true }).count(), 0);
 
+  await button('Изменить права').first().click();
+  const permissions = page.getByRole('dialog', { name: 'Изменить права источника' });
+  assert.equal(await permissions.getByLabel('Отправка уведомлений').isChecked(), true);
+  assert.equal(await permissions.getByRole('button', { name: 'Сохранить с подтверждением' }).isDisabled(), true);
+  await permissions.getByLabel('Звонки и разговоры Code Mode').check();
+  await permissions.getByRole('button', { name: 'Сохранить с подтверждением' }).click();
+  await page.getByText('Действие подтверждено', { exact: true }).waitFor();
+  assert.deepEqual(changes.at(-1), { action: 'integration.permissions.update', targetId: 'fixture',
+    expectedRevision: 0, scopes: ['notify:send', 'agents:connect', 'calls:start'] });
+  await page.getByText(/Отправка уведомлений, Подключение агента, Звонки и разговоры Code Mode/).waitFor();
+
   await button('Подключить ChatGPT').click();
   const chatgpt = page.getByRole('dialog', { name: 'Данные подключения ChatGPT' });
   await chatgpt.waitFor();
@@ -470,7 +488,7 @@ try {
   await button('Открыть меню').click();
   await menu.getByRole('button', { name: 'Выйти' }).click();
   await login.waitFor();
-  assert.equal(changes.length, 7);
+  assert.equal(changes.length, 8);
   assert.deepEqual(errors, []);
   assert.deepEqual(external, [], 'Notify attempted external asset requests');
   await writeFile(new URL('result.json', artifact), JSON.stringify({

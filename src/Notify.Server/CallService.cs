@@ -189,6 +189,7 @@ public sealed partial class CallService
         if (call == null || call.SourceId != actor.Id) throw new Fault(404, "call_not_found");
         if (call.Mode != "conversation" || call.UsesAgent) throw new Fault(400, "invalid_call");
         if (call.Status != "active") throw new Fault(409, "call_not_ready");
+        SileroSpeech.ValidateText(text);
         _ = SayAsync(call, text, null);
     }
 

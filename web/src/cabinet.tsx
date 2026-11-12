@@ -33,6 +33,7 @@ const errors: Record<string, string> = {
   invalid_chatgpt_callback: 'Введите точный HTTPS callback из настроек подключения ChatGPT.',
   chatgpt_link_changed: 'Подключение изменилось. Обновите кабинет и повторите действие.',
   chatgpt_permissions_changed: 'Разрешения ChatGPT уже изменились. Проверьте текущий набор и повторите действие.',
+  source_permissions_changed: 'Права источника уже изменились. Проверьте текущий набор и повторите действие.',
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -225,6 +226,9 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
         } else if (state.status === 'conflict' && action === 'chatgpt.permissions.update') {
           setChatgptRevision(value => value + 1);
           finish({ tone: 'warning', title: 'Разрешения ChatGPT уже изменились', text: 'Проверьте текущие права и отправьте новый запрос.' });
+        } else if (state.status === 'conflict' && action === 'integration.permissions.update') {
+          finish({ tone: 'warning', title: errors.source_permissions_changed });
+          void load(undefined, true);
         } else if (state.status === 'denied' || state.status === 'rejected') {
           finish({ tone: 'warning', title: 'Действие отклонено', text: 'Изменения не применены.' });
         } else if (state.status === 'expired' || (state.status === 'pending' && Date.now() >= deadline)) {
@@ -311,6 +315,8 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
       if (mounted.current) {
         if (input.action === 'chatgpt.permissions.update' && error instanceof ApiError && error.status === 409)
           setChatgptRevision(value => value + 1);
+        if (input.action === 'integration.permissions.update' && error instanceof ApiError && error.status === 409)
+          void load(undefined, true);
         setOutcome({ tone: 'danger', title: errorText(error) });
       }
     } finally {

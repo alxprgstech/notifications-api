@@ -589,14 +589,23 @@ public sealed class CallTests
         using (sourceClient) using (bridgeClient) using (phoneClient) using (phoneKey)
         {
             const string route = "/api/v1/calls/announce";
-            var input = new { title = "Notify", text = "Проверка", idempotencyKey = "asterisk-test-1", target = "asterisk" };
+            var input = new { title = "Home Assistant", text = "Проверка № 42: всё работает!", idempotencyKey = "asterisk-test-1", target = "asterisk" };
             Assert.Equal(HttpStatusCode.ServiceUnavailable, (await sourceClient.PostAsJsonAsync(route, input)).StatusCode);
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             using var control = await Ws(app, Token(bridgeClient)).ConnectAsync(new Uri("ws://localhost/api/v1/telephony/connect"), deadline.Token);
+            foreach (var unsupportedText in new[] { "Hello, world!", "Тестовый звонок из Home Assistant. ALXPRGS Notify работает!" })
+            {
+                using var rejected = await sourceClient.PostAsJsonAsync(route, input with { text = unsupportedText });
+                Assert.Equal(HttpStatusCode.UnprocessableEntity, rejected.StatusCode);
+                Assert.Equal("unsupported_tts_language", (await rejected.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+            }
+            Assert.Empty(app.Speech.Synthesized);
+            Assert.Empty(app.Services.GetRequiredService<Database>().Run((c, t) => All<CallRecord>(c, t, "call")));
             await control.SendAsync(System.Text.Encoding.UTF8.GetBytes("""{"type":"heartbeat"}"""), WebSocketMessageType.Text, true, deadline.Token);
             Assert.Equal("heartbeat_ack", (await ReceiveJson(control)).GetProperty("type").GetString());
             var started = await sourceClient.PostAsJsonAsync(route, input);
             started.EnsureSuccessStatusCode();
+            Assert.Equal(input.text, Assert.Single(app.Speech.Synthesized));
             var state = await started.Content.ReadFromJsonAsync<JsonElement>();
             var id = state.GetProperty("id").GetString();
             Assert.Equal("asterisk", state.GetProperty("target").GetString());
@@ -626,12 +635,19 @@ public sealed class CallTests
         var (phoneClient, phone, phoneKey) = app.Device();
         using (sourceClient) using (phoneClient) using (phoneKey)
         {
-            var started = await sourceClient.PostAsJsonAsync("/api/v1/calls/announce", new
+            const string route = "/api/v1/calls/announce";
+            var input = new
             {
                 idempotencyKey = "announce-test-1",
                 title = "Announcement",
                 text = "Проверка завершена",
-            });
+            };
+            using var rejected = await sourceClient.PostAsJsonAsync(route, input with { text = "Проверка Wi-Fi" });
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rejected.StatusCode);
+            Assert.Equal("unsupported_tts_language", (await rejected.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+            Assert.Equal(HttpStatusCode.NotFound, (await phoneClient.GetAsync("/api/v1/calls/incoming")).StatusCode);
+            Assert.Empty(app.Speech.Synthesized);
+            var started = await sourceClient.PostAsJsonAsync(route, input);
             started.EnsureSuccessStatusCode();
             var created = await started.Content.ReadFromJsonAsync<JsonElement>();
             var callId = created.GetProperty("id").GetString()!;
@@ -688,7 +704,10 @@ public sealed class CallTests
                 await Task.Delay(100);
             }
             Assert.Equal("user", transcript.GetProperty("turns").EnumerateArray().First().GetProperty("speaker").GetString());
-            var say = Wire.Decode<JsonElement>(chat.Speak(actor, callId, "Ответ из ChatGPT", "chatgpt-say-1"));
+            using var rejected = await sourceClient.PostAsJsonAsync($"/api/v1/calls/{callId}/say", new { text = "Ответ из ChatGPT", idempotencyKey = "chatgpt-say-1" });
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rejected.StatusCode);
+            Assert.Equal("unsupported_tts_language", (await rejected.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+            var say = Wire.Decode<JsonElement>(chat.Speak(actor, callId, "Ответ из чата", "chatgpt-say-1"));
             Assert.True(say.GetProperty("ok").GetBoolean());
             var sawAgent = false; var binary = 0;
             for (var i = 0; i < 12 && (!sawAgent || binary == 0); i++)

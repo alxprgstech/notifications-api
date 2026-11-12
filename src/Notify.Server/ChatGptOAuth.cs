@@ -240,6 +240,8 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
         });
     }
 
+    internal static string? LinkedSourceId(SqliteConnection c, SqliteTransaction t) => Get<ChatGptLink>(c, t, "chatgpt_link", LinkId)?.SourceId;
+
     internal static (ChatGptLink Link, Source Source)? PermissionTarget(SqliteConnection c, SqliteTransaction t, ManagementInput input)
     {
         var link = Get<ChatGptLink>(c, t, "chatgpt_link", LinkId);

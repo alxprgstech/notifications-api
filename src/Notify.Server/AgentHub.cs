@@ -127,7 +127,15 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         WebSocketCloseStatus? closeStatus = null; string? closeReason = null;
         try
         {
-            db.Run((c, t) => { Put(c, t, "agent", agent.Id, agent with { LastSeenAt = Wire.Now }); Exec(c, t, "UPDATE agent_commands SET status='queued' WHERE agent_id=$a AND status='sent'", ("$a", agent.Id)); return 0; });
+            db.Run((c, t) =>
+            {
+                if (Get<Source>(c, t, "source", agent.SourceId) is not { Revoked: false } source ||
+                    !source.Scopes.Contains("agents:connect") || Get<Agent>(c, t, "agent", agent.Id) is not { Revoked: false } stored)
+                    throw new AgentProtocolException("agents_scope_required");
+                Put(c, t, "agent", agent.Id, stored with { LastSeenAt = Wire.Now });
+                Exec(c, t, "UPDATE agent_commands SET status='queued' WHERE agent_id=$a AND status='sent'", ("$a", agent.Id));
+                return 0;
+            });
             using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, connection.Closing.Token);
             using var helloTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token); helloTimeout.CancelAfter(TimeSpan.FromSeconds(10));
             var hello = await ReceiveFrameAsync(connection, helloTimeout.Token);

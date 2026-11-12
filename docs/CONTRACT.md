@@ -248,6 +248,8 @@ HTTP endpoint `/mcp`, тот же токен интеграции. Инстру�
 
 В `calls/announce`, `calls/conversation` и `call.dial` поле `target` принимает `android` (по умолчанию) или `asterisk`. Elevated доступен через Android. Для запуска озвучки без агента используйте `calls:announce` или `calls:start`. `POST /api/v1/calls/conversation` принимает `title`, `idempotencyKey` и необязательный `sessionId`. Для привязанной сессии требуется `agents:connect`, для обычного разговора — `calls:start`. `POST /api/v1/calls/{id}/say` принимает `text` и `idempotencyKey` для разговора с `calls:start`. См. [настройку интеграций](INTEGRATIONS.md).
 
+Владелец меняет права существующего источника через `POST /api/v1/management` с `action=integration.permissions.update`, `targetId`, `expectedRevision` из `GET /api/v1/sources` и полным массивом `scopes`. Пустой массив снимает все права. После подписанного подтверждения новые права действуют для всех действующих токенов источника. Если ревизия успела измениться до подтверждения, результат управления получает статус `conflict`.
+
 ## Связанные руководства
 
 - [Безопасность и SSO](SECURITY.md) — доверие, привязка, elevated, веб-кабинет.

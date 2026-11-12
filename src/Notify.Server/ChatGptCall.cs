@@ -60,6 +60,7 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
         }
         try { calls.SayFromActor(actor, callId, text); }
         catch (Fault error) { throw new McpException(error.Code); }
+        catch (SpeechException error) { throw new McpException(error.Code); }
         db.Run((c, t) => { Put(c, t, SayAttemptKind, attemptId, new ChatGptSayAttempt(fingerprint, callId, Wire.Now)); return 0; });
         return Wire.Encode(new { ok = true, callId });
     }
@@ -86,6 +87,7 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
                 if (attempt.Fingerprint != expected) throw new McpException("idempotency_conflict");
                 return Wire.Encode(calls.State(actor, attempt.CallId));
             }
+            SileroSpeech.ValidateText(text);
             var (agentId, agentName) = ResolveAgent(actor);
             var fingerprint = Fingerprint(title, text, agentId, target);
             calls.EnsureIdle();
@@ -124,6 +126,7 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
                 "insufficient_scope" => 403,
                 "invalid_idempotency_key" or "invalid_call" => 400,
                 "busy" or "idempotency_conflict" or "agent_offline" or "agent_unsupported" or "call_protocol_unsupported" or "call_not_ready" or "agent_not_registered" => 409,
+                SileroSpeech.UnsupportedLanguage => 422,
                 "silero_unavailable" or "silero_timeout" or "asterisk_unavailable" or "stt_unavailable" => 503,
                 "call_not_found" => 404,
                 _ => 400,

@@ -78,6 +78,63 @@ public sealed class AppFactory : WebApplicationFactory<Program>
 public sealed class CoreTests
 {
     private static CreateNotification Input(string level = "standard", DateTimeOffset? expiry = null) => new("confirmation", "Synthetic decision", "No external action", level, expiry ?? DateTimeOffset.UtcNow.AddMinutes(5));
+
+    [Fact]
+    public async Task ApprovedSourcePermissionChangesUseExistingTokenAndRejectStaleApprovals()
+    {
+        using var app = new AppFactory();
+        var (sourceClient, source) = app.Integration(scopes: ["notify:send"]);
+        var (phoneClient, phone, key) = app.Device();
+        using (sourceClient) using (phoneClient) using (key)
+        {
+            var service = app.Services.GetRequiredService<NotificationService>();
+            var owner = new Actor("web", AppFactory.Owner, [], "permission-editor");
+            var grant = new ManagementInput("integration.permissions.update", TargetId: source.Id,
+                Scopes: ["notify:send", "calls:start"], ExpectedRevision: 0);
+            Assert.Equal(403, Assert.Throws<Fault>(() => service.BeginManagement(source, grant)).Status);
+            var change = service.BeginManagement(owner, grant);
+            var stale = service.BeginManagement(owner, grant with { Scopes = [] });
+            Assert.Equal(new[] { "notify:send" }, await CurrentScopes());
+
+            Decide(change, "yes");
+            Assert.Equal("approved", Status(change));
+            Assert.Equal(new[] { "notify:send", "calls:start" }, await CurrentScopes());
+            Decide(stale, "yes");
+            Assert.Equal("conflict", Status(stale));
+
+            var remove = service.BeginManagement(owner, grant with { Scopes = [], ExpectedRevision = 1 });
+            Decide(remove, "no");
+            Assert.Equal("denied", Status(remove));
+            Assert.Equal(new[] { "notify:send", "calls:start" }, await CurrentScopes());
+            var clear = service.BeginManagement(owner, grant with { Scopes = [], ExpectedRevision = 1 });
+            Decide(clear, "yes");
+            Assert.Empty(await CurrentScopes());
+
+            async Task<string[]> CurrentScopes()
+            {
+                var session = await sourceClient.GetFromJsonAsync<JsonElement>("/api/v1/session");
+                var actor = session.GetProperty("actor");
+                Assert.Equal(source.Id, actor.GetProperty("id").GetString());
+                return actor.GetProperty("scopes").Deserialize<string[]>()!;
+            }
+
+            string? Status(Management request) => Wire.Decode<JsonElement>(Wire.Encode(service.ManagementResult(owner, request.Id)))
+                .GetProperty("status").GetString();
+
+            void Decide(Management request, string decision)
+            {
+                var db = app.Services.GetRequiredService<Database>();
+                var notificationId = db.Run((c, t) => Rows(c, t,
+                    "SELECT id FROM notifications WHERE json_extract(data,'$.managementId')=$m", ("$m", request.Id)).Single());
+                var answer = new Answer(decision);
+                var challenge = service.Challenge(phone, notificationId, answer);
+                var signature = Convert.ToBase64String(key.SignData(Convert.FromBase64String(challenge.Payload),
+                    HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+                service.Respond(phone, notificationId, new SubmitAnswer(answer, challenge.Id, signature));
+            }
+        }
+    }
+
     [Fact]
     public async Task HttpRequiresCredentialAndIntegrationCannotAnswer()
     {

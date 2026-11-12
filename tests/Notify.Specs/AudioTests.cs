@@ -60,6 +60,16 @@ public sealed class AudioTests
         using (source)
         {
             var expires = DateTimeOffset.UtcNow.AddHours(1).ToString("O");
+            using var unsupported = new HttpRequestMessage(HttpMethod.Post, "/api/v1/notifications")
+            {
+                Content = JsonContent.Create(new { kind = "voice", title = "Text voice", body = "", expiresAt = expires, voiceText = "Проверка API" }),
+            };
+            unsupported.Headers.Add("Idempotency-Key", "text-voice-1");
+            using var rejected = await source.SendAsync(unsupported);
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rejected.StatusCode);
+            Assert.Equal("unsupported_tts_language", (await rejected.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+            Assert.Empty(app.Speech.Synthesized);
+
             using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/notifications")
             {
                 Content = JsonContent.Create(new { kind = "voice", title = "Text voice", body = "", expiresAt = expires, voiceText = "Проверка синтеза" }),

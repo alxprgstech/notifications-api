@@ -408,6 +408,7 @@ internal static class OpenApiDocs
             Ok<Notification>("Уведомление создано или возвращено по идемпотентному ключу.", """{"id":"0123456789abcdef0123456789abcdef","sourceId":"abcdef0123456789abcdef0123456789","content":{"kind":"confirmation","title":"Перезапустить тестовый процесс?","body":"Процесс будет остановлен и запущен заново.","securityLevel":"elevated","expiresAt":"2030-01-01T12:00:00+00:00","allowCustom":true,"iconId":null,"correlationId":"task-42","form":null,"voiceUpload":null,"voice":null},"createdAt":1767225600000,"status":"pending","answer":null,"answeredAt":null,"managementId":null,"previewOnly":false,"formAnswer":null}"""),
             Error(400, "`invalid_idempotency_key` (8–128, без control-символов), `invalid_notification` (kind/level/сроки/длины), `invalid_form` (спецификация формы) или `invalid_request` (JSON).", """{"code":"invalid_notification"}"""),
             Error(403, "Нет scope для этого kind (`scope_required`) или источник отозван/права изменились (`source_revoked_or_scope_changed`).", """{"code":"scope_required"}"""),
+            Error(422, "`unsupported_tts_language`: `voiceText` содержит буквы вне русского алфавита.", """{"code":"unsupported_tts_language"}"""),
             Error(404, "`icon_not_found` или `audio_upload_not_found`.", """{"code":"icon_not_found"}"""),
             Error(409, "Тот же ключ с другим содержимым (`idempotency_conflict`) или повторное использование загрузки (`audio_upload_used`).", """{"code":"idempotency_conflict"}"""),
             Error(410, "Временная аудиозагрузка истекла (`audio_upload_expired`).", """{"code":"audio_upload_expired"}"""),
@@ -613,6 +614,7 @@ internal static class OpenApiDocs
                 Error(403, "Нет `calls:start`/`agents:connect` (`insufficient_scope`).", """{"code":"insufficient_scope"}"""),
                 Error(404, "Агент не зарегистрирован (`agent_not_registered`).", """{"code":"agent_not_registered"}"""),
                 Error(409, "`busy`, `agent_offline`, `agent_unsupported` или `call_protocol_unsupported`.", """{"code":"busy"}"""),
+                Error(422, "`unsupported_tts_language`: в `text` допустимы буквы русского алфавита, цифры и пунктуация. Названия и аббревиатуры пишите кириллицей. Звонок не создан.", """{"code":"unsupported_tts_language"}"""),
                 Error(503, "`silero_unavailable` или `silero_timeout`; звонок не создан, текст можно отправить обычным уведомлением.", """{"code":"silero_unavailable"}"""),
                 Unauthorized, RateLimited, InternalError],
             RequestBodyKind.Json, "Короткая русская фраза и стабильный ключ повтора.",
@@ -624,7 +626,8 @@ internal static class OpenApiDocs
             RequestBodyKind.Json, "Параметры разговора.", """{"idempotencyKey":"conversation-1","title":"Notify","target":"asterisk"}"""));
         Add("POST", "/api/v1/calls/{id}/say", new("speakCall", "Звонки", "Озвучить реплику",
             "Озвучивает реплику в активном разговоре этого источника.",
-            ApiAuth.Bearer, [Ok<object>("Реплика принята.", """{"ok":true}"""), Error(409, "Звонок ещё не активен.", """{"code":"call_not_ready"}""")],
+            ApiAuth.Bearer, [Ok<object>("Реплика принята.", """{"ok":true}"""), Error(409, "Звонок ещё не активен.", """{"code":"call_not_ready"}"""),
+                Error(422, "`unsupported_tts_language`: `text` содержит буквы вне русского алфавита.", """{"code":"unsupported_tts_language"}""")],
             RequestBodyKind.Json, "Текст и ключ идемпотентности.", """{"idempotencyKey":"say-turn-1","text":"Привет"}"""));
         Add("GET", "/api/v1/calls/{id}/transcript", new("getCallTranscript", "Звонки", "Расшифровка разговора",
             "Возвращает упорядоченные реплики участников (`user` — владелец, `agent` — выбранный чат/агент). Доступно участнику звонка: устройству, владельцу-веб-сессии или интеграции-источнику. Текст хранится в SQLite только в защищённом виде и удаляется вместе с 30-дневной историей звонка. `partial=true` означает, что распознавание части реплик завершилось ошибкой; уже полученные реплики остаются доступны, а `error` содержит код. Аудио звонка не сохраняется.",
@@ -800,13 +803,13 @@ internal static class OpenApiDocs
         Add("GET", "/api/v1/sources", new("listSources", "Управление", "Источники и их права",
             "Владелец видит все источники, интеграция с `requests:read` — только себя. `protectedWebhookSecret` никогда не возвращается; webhook secret показывается один раз при создании интеграции.",
             ApiAuth.BearerOrWeb, [
-                OkArray<SourceViewResponse>("Источники без секретов.", """[{"id":"abcdef0123456789abcdef0123456789","name":"Агент разработки","scopes":["notify:send","requests:create","agents:connect"],"preview":"hidden","iconId":null,"webhookUrl":null,"revoked":false}]"""),
+                OkArray<SourceViewResponse>("Источники без секретов.", """[{"id":"abcdef0123456789abcdef0123456789","name":"Агент разработки","scopes":["notify:send","requests:create","agents:connect"],"preview":"hidden","iconId":null,"webhookUrl":null,"revoked":false,"permissionsRevision":0,"canEditPermissions":true}]"""),
                 Unauthorized,
                 Error(403, "Интеграции нужен `requests:read` (`scope_required`).", """{"code":"scope_required"}"""),
                 RateLimited, InternalError]));
 
         Add("POST", "/api/v1/management", new("beginManagement", "Управление", "Начать изменение, подтверждаемое телефоном",
-            "Только владелец. Создаёт elevated-запрос `_system`. Изменение применяется после подписанного ответа доверенного телефона. Допускается до 20 ожидающих запросов. `chatgpt.link` выдаёт OAuth-реквизиты выделенного источника. `chatgpt.permissions.update` меняет права существующего подключения по `targetId`, `expectedRevision` и `scopes`. Оба действия ChatGPT требуют веб-сессию владельца. Новые секреты выдаются один раз через `GET /management/{id}`.",
+            "Только владелец. Создаёт elevated-запрос `_system`. Изменение применяется после подписанного ответа доверенного телефона. Допускается до 20 ожидающих запросов. `integration.permissions.update` обновляет права текущих токенов источника по `targetId`, `expectedRevision` и `scopes`. `chatgpt.link` выдаёт OAuth-реквизиты выделенного источника. `chatgpt.permissions.update` меняет права этого подключения. Оба действия ChatGPT требуют веб-сессию владельца. Новые секреты выдаются один раз через `GET /management/{id}`.",
             ApiAuth.BearerOrWebPost, [
                 Ok<Management>("Запрос управления создан; ожидает ответа телефона."),
                 Error(400, "`invalid_management_action`, `invalid_integration`, `invalid_agent`, `target_required`; для webhook — `webhook_not_allowlisted_https`/`webhook_private_address`; тело — `invalid_request`.", """{"code":"invalid_management_action"}"""),
@@ -1008,11 +1011,11 @@ internal static class OpenApiDocs
         ["FcmInput.token"] = "FCM registration token длиной 10–4096; хранится только для доверенного устройства.",
         ["AudioGrantInput.challengeId"] = "Id audio-challenge, выданного для этого elevated-вложения.",
         ["AudioGrantInput.signature"] = "Base64 DER-подпись P-256/SHA-256 точных байтов audio-challenge.",
-        ["ManagementInput.action"] = "`integration.create`, `integration.revoke`, `device.revoke`, `source.update`, `agent.register`, `chatgpt.link` или `chatgpt.permissions.update`.",
+        ["ManagementInput.action"] = "`integration.create`, `integration.permissions.update`, `integration.revoke`, `device.revoke`, `source.update`, `agent.register`, `chatgpt.link` или `chatgpt.permissions.update`.",
         ["ManagementInput.name"] = "Имя нового источника/агента; обязательно для create/register, ≤ 80 символов.",
         ["ManagementInput.targetId"] = "Id источника/устройства. Не нужен для `integration.create` и `chatgpt.link`.",
-        ["ManagementInput.scopes"] = "Права нового источника или полный набор прав ChatGPT. Для `chatgpt.permissions.update` пустой массив отключает все права.",
-        ["ManagementInput.expectedRevision"] = "Текущая ревизия прав из GET /api/v1/chatgpt. Обязательна для `chatgpt.permissions.update`.",
+        ["ManagementInput.scopes"] = "Права нового источника или полный набор прав при редактировании. При редактировании пустой массив отключает все права.",
+        ["ManagementInput.expectedRevision"] = "Текущая ревизия прав из GET /api/v1/sources или GET /api/v1/chatgpt. Обязательна при редактировании прав.",
         ["ManagementInput.preview"] = "`hidden` или `full` — показывать ли содержание на экране блокировки.",
         ["ManagementInput.iconId"] = "Иконка источника (владельца или своя).",
         ["ManagementInput.webhookUrl"] = "Публичный HTTPS URL из allowlist `Notify__WebhookHosts`; секрет выдаётся один раз.",
@@ -1040,6 +1043,8 @@ internal static class OpenApiDocs
         ["SourceViewResponse.iconId"] = "Иконка источника по умолчанию.",
         ["SourceViewResponse.webhookUrl"] = "URL webhook или `null`.",
         ["SourceViewResponse.revoked"] = "Отозванный источник не может отправлять и читать.",
+        ["SourceViewResponse.permissionsRevision"] = "Текущая ревизия прав источника.",
+        ["SourceViewResponse.canEditPermissions"] = "Права источника доступны для редактирования владельцем.",
         ["Actor.kind"] = "`integration`, `device` или `web`.",
         ["Actor.id"] = "Id источника, устройства или SSO sub владельца.",
         ["Actor.scopes"] = "Права источника; у устройства и веб-сессии пусто.",
@@ -1193,7 +1198,7 @@ internal static class OpenApiDocs
         ["CallViewResponse.securityLevel"] = ["standard", "elevated"],
         ["CallViewResponse.reason"] = ["rejected", "missed", "timeout", "disconnected", "unsupported", "busy", "invalid_audio", "degraded", "revoked", "ended"],
         ["ReceiptInput.status"] = ["device_received", "opened"],
-        ["ManagementInput.action"] = ["integration.create", "integration.revoke", "device.revoke", "source.update", "agent.register", "chatgpt.link", "chatgpt.permissions.update"],
+        ["ManagementInput.action"] = ["integration.create", "integration.permissions.update", "integration.revoke", "device.revoke", "source.update", "agent.register", "chatgpt.link", "chatgpt.permissions.update"],
         ["ManagementInput.preview"] = ["hidden", "full"],
         ["Management.status"] = ["pending", "approved", "denied", "expired", "conflict"],
         ["ManagementStatusResponse.status"] = ["pending", "approved", "denied", "expired", "conflict"],
@@ -1209,11 +1214,11 @@ internal static class OpenApiDocs
 
     private static readonly Dictionary<string, string[]> ItemEnums = new(StringComparer.Ordinal)
     {
-        ["ManagementInput.scopes"] = ["notify:send", "requests:create", "requests:read", "requests:cancel", "icons:write", "agents:connect", "calls:start"],
+        ["ManagementInput.scopes"] = ["notify:send", "requests:create", "requests:read", "requests:cancel", "icons:write", "agents:connect", "calls:start", "calls:announce", "telephony:bridge"],
         ["ManagementInput.capabilities"] = ["text_tasks", "voice_messages", "realtime_audio"],
         ["AgentViewResponse.capabilities"] = ["text_tasks", "voice_messages", "realtime_audio"],
         ["AgentViewResponse.callProtocols"] = ["alxprgs.notify.call.v2"],
-        ["SourceViewResponse.scopes"] = ["notify:send", "requests:create", "requests:read", "requests:cancel", "icons:write", "agents:connect"],
+        ["SourceViewResponse.scopes"] = ["notify:send", "requests:create", "requests:read", "requests:cancel", "icons:write", "agents:connect", "calls:start", "calls:announce", "telephony:bridge"],
         ["Actor.scopes"] = ["notify:send", "requests:create", "requests:read", "requests:cancel", "icons:write", "agents:connect"],
     };
 

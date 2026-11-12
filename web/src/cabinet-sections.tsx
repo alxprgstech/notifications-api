@@ -12,7 +12,7 @@ export type Notification = {
 };
 export type Cursor = { before: number; beforeId: string };
 export type HistoryPage = { items: Notification[]; next: Cursor | null };
-export type Source = { id: string; name: string; preview: string; scopes: string[]; revoked: boolean };
+export type Source = { id: string; name: string; preview: string; scopes: string[]; revoked: boolean; permissionsRevision: number; canEditPermissions: boolean };
 export type Device = { id: string; name: string; revoked: boolean };
 export type Agent = {
   id: string; sourceId: string; name: string; capabilities: string[]; revoked: boolean;
@@ -26,12 +26,14 @@ export type Call = {
 export type ManagementInput =
   | { action: 'chatgpt.link' }
   | { action: 'chatgpt.permissions.update'; targetId: string; expectedRevision: number; scopes: string[] }
+  | { action: 'integration.permissions.update'; targetId: string; expectedRevision: number; scopes: string[] }
   | { action: 'integration.create'; name: string; scopes: string[]; webhookUrl: string | null }
   | { action: 'source.update'; targetId: string; preview: 'full' | 'hidden' }
   | { action: 'integration.revoke' | 'device.revoke'; targetId: string }
   | { action: 'agent.register'; targetId: string; name: string; capabilities: string[] };
 export type ManagementForm = { kind: 'create' }
   | { kind: 'agent'; source: Source }
+  | { kind: 'source-permissions'; source: Source }
   | { kind: 'revoke-source'; source: Source }
   | { kind: 'revoke-device'; device: Device };
 
@@ -202,6 +204,11 @@ export function Integrations({ sources, agents, busy, open, manage, blocked }: {
         <Badge tone={source.revoked ? 'neutral' : 'success'}>{source.revoked ? 'Доступ отозван' : 'Активен'}</Badge>
       </div>
       {!source.revoked && <>
+        {source.canEditPermissions && <div className="entity-controls">
+          <div><strong>Права источника</strong><p>{source.scopes.map(scope => sourcePermissionLabels[scope] ?? scope).join(', ') || 'Права не выданы'}</p></div>
+          <button className="button secondary" disabled={busy || blocked}
+            onClick={() => open({ kind: 'source-permissions', source })}>Изменить права</button>
+        </div>}
         <div className="entity-controls">
           <div><strong>Экран блокировки</strong><p>{source.preview === 'hidden' ? 'Содержание скрыто' : 'Содержание может показываться'}</p></div>
           <button className="button secondary" disabled={busy}
@@ -306,6 +313,13 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
 }
 
 const sourceScopes = ['notify:send', 'requests:create', 'requests:read', 'requests:cancel', 'icons:write', 'agents:connect'];
+const sourcePermissionLabels: Record<string, string> = {
+  'notify:send': 'Отправка уведомлений', 'requests:create': 'Создание подтверждений и форм',
+  'requests:read': 'Чтение своих запросов и ответов', 'requests:cancel': 'Отмена своих запросов',
+  'icons:write': 'Загрузка иконок', 'agents:connect': 'Подключение агента',
+  'calls:start': 'Звонки и разговоры Code Mode', 'calls:announce': 'Звонки с озвучкой',
+  'telephony:bridge': 'Мост Asterisk',
+};
 
 export function ManagementDialog({ form, close, submit }: {
   form: ManagementForm; close: () => void; submit: (input: ManagementInput) => void;
@@ -313,7 +327,30 @@ export function ManagementDialog({ form, close, submit }: {
   const [name, setName] = useState('');
   const [webhook, setWebhook] = useState('');
   const [sourceType, setSourceType] = useState('default');
-  const [selected, setSelected] = useState(['text_tasks']);
+  const [selected, setSelected] = useState(form.kind === 'source-permissions' ? form.source.scopes : ['text_tasks']);
+  if (form.kind === 'source-permissions') {
+    const { source } = form;
+    const changed = selected.length !== source.scopes.length || selected.some(scope => !source.scopes.includes(scope));
+    return <Dialog title="Изменить права источника" close={close}>
+      <form className="management-form" onSubmit={event => {
+        event.preventDefault();
+        if (changed) submit({ action: 'integration.permissions.update', targetId: source.id, expectedRevision: source.permissionsRevision, scopes: selected });
+      }}>
+        <p>Источник <strong>{source.name}</strong>. После подтверждения на доверенном телефоне новые права получат действующие токены источника.</p>
+        <fieldset><legend>Разрешения</legend>
+          {Object.entries(sourcePermissionLabels).map(([scope, label]) => <label className="checkbox" key={scope}>
+            <input type="checkbox" checked={selected.includes(scope)} onChange={event => {
+              const checked = event.target.checked;
+              setSelected(current => checked ? [...current, scope] : current.filter(value => value !== scope));
+            }} /> {label}
+          </label>)}
+        </fieldset>
+        <div className="dialog-actions"><button type="button" className="button secondary" onClick={close}>Отмена</button>
+          <button className="button primary" disabled={!changed}>Сохранить с подтверждением</button>
+        </div>
+      </form>
+    </Dialog>;
+  }
   if (form.kind === 'revoke-source' || form.kind === 'revoke-device') {
     const source = form.kind === 'revoke-source';
     const name = source ? form.source.name : form.device.name;
