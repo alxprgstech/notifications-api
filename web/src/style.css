@@ -1,19 +1,19 @@
 
 :root {
   color-scheme: light;
-  --canvas: #f7f8fa;
+  --canvas: #f3f5fa;
   --surface: #fff;
-  --surface-2: #f1f3f6;
-  --hover: #e9edf3;
-  --line: #e0e5ed;
+  --surface-2: #f9fafd;
+  --hover: #ddeef1;
+  --line: #dce2ed;
   --control: #8794a6;
-  --text: #111722;
-  --muted: #505d70;
-  --link: #2058c7;
-  --accent: #245bd0;
-  --accent-hover: #1848af;
+  --text: #17243a;
+  --muted: #4a5d74;
+  --link: #006a70;
+  --accent: #006a70;
+  --accent-hover: #00565c;
   --on-accent: #fff;
-  --focus: #2058c7;
+  --focus: #006a70;
   --info: #194dab;
   --info-bg: #edf3ff;
   --success: #17643a;
@@ -35,19 +35,19 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --canvas: #0a0c10;
-  --surface: #10141b;
-  --surface-2: #171d27;
-  --hover: #202837;
-  --line: #293343;
+  --canvas: #141821;
+  --surface: #202736;
+  --surface-2: #181d28;
+  --hover: #25434b;
+  --line: #343f54;
   --control: #6b7a90;
-  --text: #f2f5fa;
-  --muted: #aab7cb;
-  --link: #93b9ff;
-  --accent: #82afff;
-  --accent-hover: #a5c8ff;
-  --on-accent: #0b1a35;
-  --focus: #93b9ff;
+  --text: #f2f5fc;
+  --muted: #b9c8db;
+  --link: #75ded2;
+  --accent: #75ded2;
+  --accent-hover: #a2eee6;
+  --on-accent: #102a2b;
+  --focus: #75ded2;
   --info: #a8c8ff;
   --info-bg: #182943;
   --success: #89e3ad;
@@ -435,3 +435,9 @@ body:has(.dialog[open]) { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+.overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 12px; margin-bottom: 24px; }
+.overview-card { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; text-align: start; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; cursor: pointer; }
+.overview-card:hover { background: var(--hover); }
+.overview-card span { grid-column: 1 / -1; color: var(--muted); }
+.overview-card strong { font-size: 1.45rem; }
+.overview-card svg { color: var(--link); }

@@ -262,6 +262,8 @@ async def session_loop(session, ari, origin, headers, endpoint):
         async with session.ws_connect(origin + "/api/v1/telephony/connect", headers=headers, heartbeat=10) as control:
             async def incoming_call(channel, request_id, ack):
                 try:
+                    # Send SIP alerting before waiting for the agent. No media is sent until answer.
+                    await ari.request("POST", f"channels/{channel}/ring")
                     await control.send_json({"type": "incoming", "requestId": request_id, "extension": ari.assistant[0]})
                     invite = await asyncio.wait_for(ack, 8)
                     if invite.get("ok") is True:

@@ -87,7 +87,7 @@ try {
   await page.waitForFunction(() => {
     const content = document.querySelector('.reference-section .references-rendered');
     return content?.textContent.includes('ALXPRGS Notify API')
-      && getComputedStyle(content).getPropertyValue('--scalar-background-1').trim() === '#10141b';
+      && getComputedStyle(content).getPropertyValue('--scalar-background-1').trim() === '#202736';
   }, null, { timeout: 15_000 });
   await shot('docs-dark');
   const guides = {
@@ -278,6 +278,17 @@ try {
   });
 
   await page.goto(origin);
+  await heading('Обзор').waitFor();
+  await page.getByText('Часть данных не загрузилась', { exact: true }).waitFor();
+  await shot('overview-light');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await waitTheme('dark');
+  await noOverflow('Mobile overview');
+  await shot('overview-mobile-dark');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.getByRole('navigation', { name: 'Основная навигация' }).getByRole('button', { name: 'История' }).click();
   await heading('История').waitFor();
   await page.getByRole('alert').waitFor();
   assert.equal(await heading('Событий пока нет').count(), 0);

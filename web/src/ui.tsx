@@ -136,6 +136,7 @@ export function Badge({ tone = 'neutral', children }: { tone?: string; children:
 }
 
 export const sections = [
+  { id: 'overview', title: 'Обзор', icon: 'shield', description: 'Состояние подключений и последние события Notify.' },
   { id: 'history', title: 'История', icon: 'history', description: 'Уведомления, запросы и решения за последние 30 дней.' },
   { id: 'sources', title: 'Интеграции', icon: 'link', description: 'Управляйте источниками уведомлений и подключёнными агентами.' },
   { id: 'devices', title: 'Устройства', icon: 'phone', description: 'Телефоны, которым вы доверяете подтверждать действия.' },

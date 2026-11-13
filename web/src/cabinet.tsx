@@ -109,7 +109,7 @@ export function Cabinet() {
 }
 
 function Workspace({ session, expire }: { session: Session; expire: () => void }) {
-  const [tab, setTab] = useState<Section>('history');
+  const [tab, setTab] = useState<Section>('overview');
   const [filter, setFilter] = useState<'all' | 'pending'>('all');
   const [resources, setResources] = useState<Resources>({
     history: { items: [], next: null }, sources: [], devices: [], agents: [], calls: [],
@@ -339,7 +339,7 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
   }
 
   const current = sections.find(section => section.id === tab)!;
-  const failure = failures[tab] || (tab === 'sources' ? failures.agents : undefined);
+  const failure = tab === 'overview' ? undefined : failures[tab] || (tab === 'sources' ? failures.agents : undefined);
   const busy = submitting || !!approval || !!secret || !!chatgptSecret || signingOut;
   const { history, sources, agents, devices, calls } = resources;
   const navigation = <nav aria-label="Основная навигация" className="section-nav">
@@ -391,7 +391,25 @@ function Workspace({ session, expire }: { session: Session; expire: () => void }
         {submitting && <Notice title="Отправляем запрос на подтверждение" />}
         {approval && <Notice title="Подтвердите действие на телефоне"><p>Откройте запрос в Notify. Потребуется биометрия или PIN Android.</p></Notice>}
         {outcome && <Notice title={outcome.title} tone={outcome.tone} dismiss={() => setOutcome(null)}>{outcome.text && <p>{outcome.text}</p>}</Notice>}
-        {tab !== 'history' && loading && !resources[tab].length && <div className="loading-panel" role="status">Загружаем раздел…</div>}
+        {tab !== 'history' && tab !== 'overview' && loading && !resources[tab].length && <div className="loading-panel" role="status">Загружаем раздел…</div>}
+        {tab === 'overview' && <>
+          <div className="overview-grid" aria-busy={loading}>
+            {([
+              ['history', 'События на загруженной странице', history.items.length, failures.history],
+              ['sources', 'Источники с доступом', sources.filter(item => !item.revoked).length, failures.sources],
+              ['sources', 'Агенты на связи', agents.filter(item => item.online && !item.revoked).length, failures.agents],
+              ['devices', 'Доверенные устройства', devices.filter(item => !item.revoked).length, failures.devices],
+              ['calls', 'Звонки в журнале', calls.length, failures.calls],
+            ] as const).map(([section, label, count, error]) => <button key={label} type="button" className="overview-card"
+              onClick={() => navigate(section)}><span>{label}</span><strong>{error ? 'Нет данных' : loading ? '…' : count}</strong>
+              <Icon name="arrow" size={16} /></button>)}
+          </div>
+          {Object.values(failures).some(Boolean) && <Notice tone="warning" title="Часть данных не загрузилась" />}
+          <h2>Последние события</h2>
+          <History items={history.items.slice(0, 5)} sources={sources} filter="all" setFilter={value => { setFilter(value); navigate('history'); }}
+            open={openDetail} next={null} more={() => navigate('history')} loading={loading}
+            failed={!!failures.history} integrations={() => navigate('sources')} />
+        </>}
         {tab === 'history' && <History items={history.items} sources={sources} filter={filter} setFilter={setFilter}
           open={openDetail} next={history.next} more={() => { if (history.next) void load(history.next); }} loading={loading}
           failed={!!failure} integrations={() => navigate('sources')} />}
