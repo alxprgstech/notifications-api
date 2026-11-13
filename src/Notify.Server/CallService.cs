@@ -840,14 +840,20 @@ public sealed partial class CallService
                 }
                 else
                 {
-                    var turnId = RecordTurn(call, "user", "", status: "error", error: error ?? "stt_unavailable");
-                    state.LastUserTurnId = turnId;
+                    var turnId = RecordTurn(call, "user", "", status: "error", error: error ?? "stt_unavailable", id: turn.Id);
+                    lock (state.Gate)
+                    {
+                        if (call.PhoneAssistant && state.UserGeneration != turn.UserGeneration) continue;
+                        state.LastUserTurnId = turnId;
+                    }
                     await SendTranscript(call, turnId, "user", "", "error", error ?? "stt_unavailable");
                     if (call.UsesAgent)
                         await agents.SendControlAsync(call.AgentId, "dialog.error", new
                         {
                             callId = call.Id, sessionId = call.SessionId, turnId, error = error ?? "stt_unavailable"
                         });
+                    if (call.PhoneAssistant)
+                        await SayAsync(call, "Не удалось распознать речь. Повторите, пожалуйста.", turnId);
                 }
             }
         }
