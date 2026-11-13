@@ -14,6 +14,42 @@ public sealed partial class CallService
     internal static bool IsOrdinarySession(AgentSession[] sessions, string id) =>
         id != PhoneAssistantSession && sessions.Any(session => session.Id == id);
 
+    private const uint PhoneReadyToneFrames = 9;
+
+    private async Task<bool> SendPhoneReadyToneAsync(Call call, MediaSide side)
+    {
+        const int samplesPerFrame = AudioBytes / 2;
+        const int sampleRate = 16000;
+        const int frequency = 660;
+        const int fadeSamples = 160;
+        try
+        {
+            for (uint index = 0; index < PhoneReadyToneFrames; index++)
+            {
+                call.Cts.Token.ThrowIfCancellationRequested();
+                var frame = new byte[FrameBytes];
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(frame, index);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(4), index * 20);
+                for (var offset = 0; offset < samplesPerFrame; offset++)
+                {
+                    var sample = (int)index * samplesPerFrame + offset;
+                    var remaining = (int)PhoneReadyToneFrames * samplesPerFrame - 1 - sample;
+                    var gain = Math.Min(fadeSamples, Math.Min(sample, remaining)) / (double)fadeSamples;
+                    var value = (short)(2800 * gain * Math.Sin(2 * Math.PI * frequency * sample / sampleRate));
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(frame.AsSpan(HeaderBytes + offset * 2), value);
+                }
+                if (!side.Outbound.TryEnqueue(frame))
+                {
+                    await EndAsync(call, "degraded");
+                    return false;
+                }
+                await Task.Delay(20, call.Cts.Token);
+            }
+            return true;
+        }
+        catch (OperationCanceledException) when (call.Cts.IsCancellationRequested) { return false; }
+    }
+
     private sealed class SipPeer(string sourceId, WebSocket socket)
     {
         public string SourceId { get; } = sourceId;

@@ -516,6 +516,7 @@ public sealed partial class CallService
             {
                 if (notified)
                 {
+                    if (call.PhoneAssistant && !await SendPhoneReadyToneAsync(call, side)) return;
                     StartConversation(call);
                     if (call.UsesAgent)
                         await agents.SendControlAsync(call.AgentId, "call.active", new { callId = call.Id, inviteId = call.InviteId, mode = call.Mode });
@@ -700,7 +701,7 @@ public sealed partial class CallService
     private void StartConversation(Call call)
     {
         if (call.Conversation != null) return;
-        var conversation = new ConversationState();
+        var conversation = new ConversationState { PhoneSequence = call.PhoneAssistant ? PhoneReadyToneFrames : 0 };
         lock (sync) call.Conversation = conversation;
         conversation.Loop = ConversationLoopAsync(call, conversation);
     }

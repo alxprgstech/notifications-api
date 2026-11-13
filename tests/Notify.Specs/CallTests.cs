@@ -642,6 +642,13 @@ public sealed class CallTests
                 $"ws://localhost/api/v1/telephony/calls/{callId}/audio?inviteId={accepted.GetProperty("inviteId").GetString()}"), resources.Token);
             Assert.Equal("active", (await ReceiveJson(audio)).GetProperty("status").GetString());
             Assert.Equal("call.accepted", (await ReceiveJson(agent)).GetProperty("type").GetString());
+            for (uint frame = 0; frame < 9; frame++)
+            {
+                var (type, bytes) = await ReceiveAny(audio, resources.Token);
+                Assert.Equal(WebSocketMessageType.Binary, type);
+                Assert.Equal(frame, BinaryPrimitives.ReadUInt32BigEndian(bytes));
+                Assert.Contains(bytes.Skip(12), sample => sample != 0);
+            }
             Assert.Equal("call.active", (await ReceiveJson(agent)).GetProperty("type").GetString());
             using var android = await phoneHttp.PostAsJsonAsync("/api/v1/calls", new
             {
