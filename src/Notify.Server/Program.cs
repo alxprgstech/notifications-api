@@ -193,6 +193,7 @@ api.MapPost("/calls/conversation", (CallConversationInput input, HttpContext c, 
     ChatGptCall.RestAsync(() => calls.StartConversation(Auth.Actor(c), input.Title, input.IdempotencyKey, ct, input.Target, input.SessionId)));
 api.MapPost("/calls/{id}/say", (string id, CallSpeakInput input, HttpContext c, ChatGptCall calls) =>
     ChatGptCall.RestAsync(() => Task.FromResult(calls.Speak(Auth.Actor(c), id, input.Text, input.IdempotencyKey))));
+api.MapGet("/telephony/assistant", (HttpContext c, CallService calls) => calls.PhoneAssistantRoute(Auth.Actor(c)));
 api.Map("/telephony/connect", async (HttpContext c, CallService calls, CancellationToken ct) =>
 {
     var actor = Auth.Actor(c);

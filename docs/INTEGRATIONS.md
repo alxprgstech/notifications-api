@@ -55,6 +55,47 @@ sudo asterisk -rx 'channel originate PJSIP/101/sip:101@192.168.1.221:5060 applic
 
 Если телефон зазвонил и эхо слышно, можно добавить `contact = sip:101@192.168.1.221:5060` в существующую секцию AOR линии `101` с `type=aor`. Подставьте свой номер, адрес и порт. Перечитайте `res_pjsip.so` и проверьте `pjsip show contacts`. [Набор по SIP URI](https://docs.asterisk.org/Configuration/Channel-Drivers/SIP/Configuring-res_pjsip/Dialing-PJSIP-Channels/) · [Статический контакт AOR](https://docs.asterisk.org/Configuration/Channel-Drivers/SIP/Configuring-res_pjsip/PJSIP-Configuration-Sections-and-Relationships/)
 
+### Входящий звонок телефонному помощнику
+
+Проверьте `pjsip show endpoint <endpoint>` и `dialplan show <context>` на действующем Asterisk.
+Выберите свободный внутренний номер с учётом шаблонов и подключённых контекстов.
+В примере используется `7820`. Добавьте его в контекст аутентифицированного endpoint GXP1400.
+Ограничьте endpoint ACL адресом телефона или доверенной подсетью и проверьте правила сетевого
+экрана SIP/RTP. Контексты входящих транков и анонимных вызовов должны исключать этот маршрут.
+
+```ini
+exten => 7820,1,Stasis(alxprgs-notify,phone-assistant,7820)
+ same => n,Hangup()
+```
+
+Мост проверяет контекст, номер и PJSIP-канал. Вызов должен входить в Stasis до `Answer()`.
+Мост отвечает после подтверждения выделенного агента и открытия медиа Notify.
+
+```dotenv
+ASTERISK_ASSISTANT_EXTENSION=7820
+ASTERISK_ASSISTANT_CONTEXT=notify-trusted
+```
+
+Создайте отдельный источник `agents:connect` и зарегистрируйте агента `realtime_audio` в кабинете.
+Настройте Notify через существующий Docker env-файл:
+
+```dotenv
+Notify__PhoneAssistantExtension=7820
+Notify__PhoneAssistantBridgeSourceId=<source-id моста telephony:bridge>
+Notify__PhoneAssistantAgentId=<agent-id выделенного агента>
+```
+
+Сделайте резервные копии файлов Asterisk и данных Notify перед перезагрузкой конфигурации.
+В Notify Desktop сохраните токен источника в **Настройки → Телефонный помощник**.
+Войдите в Codex CLI через ChatGPT. App Server возобновляет отдельную сессию `Notify Phone Assistant`
+по сохранённому ID. Если помощник недоступен или идёт разговор, новый SIP-вызов завершается
+до ответа. Для отключения маршрута уберите номер из серверной конфигурации.
+
+Для замеров включите `Notify__PhoneAssistantTiming=true` на сервере и `NOTIFY_PHONE_TIMING=1`
+в средах Asterisk Bridge и Windows-клиента. Логи содержат ID звонка и реплики, монотонные отметки
+и длительности. Сопоставляйте события по ID. Монотонные часы разных хостов имеют разные начала.
+`first_rtp_sent` означает отправку кадра в Asterisk. Измерение на динамике требует отдельной записи.
+
 ## Локальный Code Mode
 
 Подключите `compose.codemode.yml` к тем же файлам Compose, с которыми работает Notify, и выполните `docker compose … up -d --build notify-codemode`. Контейнер слушает на `127.0.0.1:8787`. Worker использует Cloudflare Dynamic Workers через локальный Wrangler, а запросы к Notify идут по действующему HTTPS-адресу. Для отдельного стенда установите `NOTIFY_ORIGIN` на HTTPS-адрес стенда.

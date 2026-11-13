@@ -580,6 +580,67 @@ public sealed class CallTests
     }
 
     [Fact]
+    public async Task PhoneAssistantAcceptsOnlyItsConfiguredSipSourceAndAgent()
+    {
+        var bridgeId = Wire.Id();
+        var agentId = Wire.Id();
+        using var app = new AppFactory
+        {
+            UseSpeechStub = true, PhoneAssistantExtension = "7820", PhoneAssistantBridgeSourceId = bridgeId,
+            PhoneAssistantAgentId = agentId, CallAudioStartDelayMs = 3000
+        };
+        var (bridgeHttp, _) = app.Integration(bridgeId, ["telephony:bridge"]);
+        var (otherBridge, _) = app.Integration(scopes: ["telephony:bridge"]);
+        var (agentHttp, source) = app.Integration(scopes: ["agents:connect"]);
+        var (phoneHttp, _, phoneKey) = app.Device();
+        using var resources = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        using (bridgeHttp) using (otherBridge) using (agentHttp) using (phoneHttp) using (phoneKey)
+        {
+            app.Services.GetRequiredService<Database>().Run((c, t) =>
+            {
+                Put(c, t, "agent", agentId, new Agent(agentId, source.Id, "Phone assistant", ["realtime_audio"], Wire.Now));
+                return 0;
+            });
+            var route = await agentHttp.GetFromJsonAsync<JsonElement>("/api/v1/telephony/assistant");
+            Assert.Equal("7820", route.GetProperty("extension").GetString());
+            Assert.Equal(HttpStatusCode.Forbidden, (await otherBridge.GetAsync("/api/v1/telephony/assistant")).StatusCode);
+            using (var stranger = await Ws(app, Token(otherBridge)).ConnectAsync(
+                new Uri("ws://localhost/api/v1/telephony/connect"), resources.Token))
+            {
+                await SendText(stranger, new { type = "incoming", requestId = Wire.Id(), extension = "7820" });
+                Assert.Equal("rejected", (await ReceiveJson(stranger)).GetProperty("code").GetString());
+                await stranger.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", resources.Token);
+            }
+
+            using var control = await Ws(app, Token(bridgeHttp)).ConnectAsync(
+                new Uri("ws://localhost/api/v1/telephony/connect"), resources.Token);
+            await SendText(control, new { type = "incoming", requestId = Wire.Id(), extension = "7820" });
+            Assert.Equal("agent_offline", (await ReceiveJson(control)).GetProperty("code").GetString());
+            var registered = app.Services.GetRequiredService<AgentHub>().Get(agentId)!;
+            using var agent = await ConnectAgentSessions(app, Token(agentHttp), registered, ["notify-phone-assistant"]);
+            await SendText(control, new { type = "incoming", requestId = Wire.Id(), extension = "7821" });
+            Assert.Equal("rejected", (await ReceiveJson(control)).GetProperty("code").GetString());
+            var requestId = Wire.Id();
+            await SendText(control, new { type = "incoming", requestId, extension = "7820" });
+            var invite = (await ReceiveJson(agent)).GetProperty("payload");
+            Assert.True(invite.GetProperty("phoneAssistant").GetBoolean());
+            var callId = invite.GetProperty("callId").GetString();
+            await SendText(agent, new { type = "call.accept", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
+            var accepted = await ReceiveJson(control);
+            Assert.True(accepted.GetProperty("ok").GetBoolean());
+            Assert.Equal(requestId, accepted.GetProperty("requestId").GetString());
+            Assert.Equal(HttpStatusCode.NotFound, (await phoneHttp.GetAsync("/api/v1/calls/incoming")).StatusCode);
+            using var audio = await Ws(app, Token(bridgeHttp)).ConnectAsync(new Uri(
+                $"ws://localhost/api/v1/telephony/calls/{callId}/audio?inviteId={accepted.GetProperty("inviteId").GetString()}"), resources.Token);
+            Assert.Equal("active", (await ReceiveJson(audio)).GetProperty("status").GetString());
+            Assert.Equal("call.accepted", (await ReceiveJson(agent)).GetProperty("type").GetString());
+            Assert.Equal("call.active", (await ReceiveJson(agent)).GetProperty("type").GetString());
+            await SendText(control, new { type = "ended", callId, reason = "ended" });
+            Assert.Equal("call.ended", (await ReceiveJson(agent)).GetProperty("type").GetString());
+        }
+    }
+
+    [Fact]
     public async Task AsteriskAnnouncementHasIndependentRouteAndDelay()
     {
         using var app = new AppFactory { UseSpeechStub = true, CallAudioStartDelayMs = 150 };

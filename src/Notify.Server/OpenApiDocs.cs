@@ -800,6 +800,15 @@ internal static class OpenApiDocs
                 Error(403, "Интеграции недоступно (`owner_required`).", """{"code":"owner_required"}"""),
                 RateLimited, InternalError]));
 
+        Add("GET", "/api/v1/telephony/assistant", new("getPhoneAssistantRoute", "Звонки", "Маршрут телефонного помощника",
+            "Возвращает внутренний номер выделенному агенту телефонного помощника. Требуется токен интеграции с правом `agents:connect`.",
+            ApiAuth.Bearer, [
+                Ok<PhoneAssistantRouteResponse>("Внутренний номер Asterisk.", """{"extension":"7820"}"""),
+                Unauthorized,
+                Error(403, "Требуется право `agents:connect`.", """{"code":"insufficient_scope"}"""),
+                Error(404, "Маршрут не настроен для этого агента.", """{"code":"phone_assistant_not_configured"}"""),
+                RateLimited, InternalError]));
+
         Add("GET", "/api/v1/agents/self", new("getSourceAgent", "Управление", "Агент текущего источника",
             "Токен интеграции с правом `agents:connect` определяет источник. Запрос возвращает регистрацию и текущее состояние без открытия WebSocket.",
             ApiAuth.Bearer, [
