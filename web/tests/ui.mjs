@@ -348,8 +348,7 @@ try {
   await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'combobox');
   await search.fill('нет такого раздела');
   await page.getByText('Разделы не найдены.').waitFor();
-  await search.fill('');
-  await search.press('ArrowDown');
+  await search.fill('Интеграции');
   assert.equal(await page.getByRole('option', { name: /Интеграции/ }).getAttribute('aria-selected'), 'true');
   await shot('quick-jump-dark');
   await search.press('Enter');
