@@ -588,7 +588,7 @@ public sealed class CallTests
         using var app = new AppFactory
         {
             UseSpeechStub = true, PhoneAssistantExtension = "7820", PhoneAssistantBridgeSourceId = bridgeId,
-            PhoneAssistantAgentId = agentId
+            PhoneAssistantAgentId = agentId, CallAudioStartDelayMs = 350
         };
         var (bridgeHttp, _) = app.Integration(bridgeId, ["telephony:bridge"]);
         var (otherBridge, _) = app.Integration(scopes: ["telephony:bridge"]);
@@ -638,6 +638,7 @@ public sealed class CallTests
             Assert.True(accepted.GetProperty("ok").GetBoolean());
             Assert.Equal(requestId, accepted.GetProperty("requestId").GetString());
             Assert.Equal(HttpStatusCode.NotFound, (await phoneHttp.GetAsync("/api/v1/calls/incoming")).StatusCode);
+            var mediaClock = System.Diagnostics.Stopwatch.StartNew();
             using var audio = await Ws(app, Token(bridgeHttp)).ConnectAsync(new Uri(
                 $"ws://localhost/api/v1/telephony/calls/{callId}/audio?inviteId={accepted.GetProperty("inviteId").GetString()}"), resources.Token);
             Assert.Equal("active", (await ReceiveJson(audio)).GetProperty("status").GetString());
@@ -646,6 +647,7 @@ public sealed class CallTests
             {
                 var (type, bytes) = await ReceiveAny(audio, resources.Token);
                 Assert.Equal(WebSocketMessageType.Binary, type);
+                Assert.True(mediaClock.ElapsedMilliseconds >= 320);
                 Assert.Equal(frame, BinaryPrimitives.ReadUInt32BigEndian(bytes));
                 Assert.Contains(bytes.Skip(12), sample => sample != 0);
             }

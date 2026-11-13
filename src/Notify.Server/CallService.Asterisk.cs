@@ -24,6 +24,8 @@ public sealed partial class CallService
         const int fadeSamples = 160;
         try
         {
+            // SIP media may still be opening on the handset after the bridge attaches.
+            await WaitForAudioAsync(call, call.Cts.Token);
             for (uint index = 0; index < PhoneReadyToneFrames; index++)
             {
                 call.Cts.Token.ThrowIfCancellationRequested();
