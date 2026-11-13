@@ -580,14 +580,15 @@ public sealed class CallTests
     }
 
     [Fact]
-    public async Task PhoneAssistantAcceptsOnlyItsConfiguredSipSourceAndAgent()
+    public async Task SharedAgentRoutesTrustedSipAndAndroidOnOneSocket()
     {
+        const string phoneSession = "notify-phone-assistant";
         var bridgeId = Wire.Id();
         var agentId = Wire.Id();
         using var app = new AppFactory
         {
             UseSpeechStub = true, PhoneAssistantExtension = "7820", PhoneAssistantBridgeSourceId = bridgeId,
-            PhoneAssistantAgentId = agentId, CallAudioStartDelayMs = 3000
+            PhoneAssistantAgentId = agentId
         };
         var (bridgeHttp, _) = app.Integration(bridgeId, ["telephony:bridge"]);
         var (otherBridge, _) = app.Integration(scopes: ["telephony:bridge"]);
@@ -609,7 +610,7 @@ public sealed class CallTests
             {
                 await SendText(stranger, new { type = "incoming", requestId = Wire.Id(), extension = "7820" });
                 Assert.Equal("rejected", (await ReceiveJson(stranger)).GetProperty("code").GetString());
-                await stranger.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", resources.Token);
+                await stranger.CloseAsync(WebSocketCloseStatus.NormalClosure, "", resources.Token);
             }
 
             using var control = await Ws(app, Token(bridgeHttp)).ConnectAsync(
@@ -617,13 +618,20 @@ public sealed class CallTests
             await SendText(control, new { type = "incoming", requestId = Wire.Id(), extension = "7820" });
             Assert.Equal("agent_offline", (await ReceiveJson(control)).GetProperty("code").GetString());
             var registered = app.Services.GetRequiredService<AgentHub>().Get(agentId)!;
-            using var agent = await ConnectAgentSessions(app, Token(agentHttp), registered, ["notify-phone-assistant"]);
+            using var agent = await ConnectAgentSessions(app, Token(agentHttp), registered, ["selected-chat", phoneSession]);
             await SendText(control, new { type = "incoming", requestId = Wire.Id(), extension = "7821" });
             Assert.Equal("rejected", (await ReceiveJson(control)).GetProperty("code").GetString());
+            using var invalid = await phoneHttp.PostAsJsonAsync("/api/v1/calls", new
+            {
+                sourceId = source.Id, sessionId = phoneSession, mode = "conversation"
+            });
+            Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
             var requestId = Wire.Id();
             await SendText(control, new { type = "incoming", requestId, extension = "7820" });
             var invite = (await ReceiveJson(agent)).GetProperty("payload");
             Assert.True(invite.GetProperty("phoneAssistant").GetBoolean());
+            Assert.Equal(source.Id, invite.GetProperty("sourceId").GetString());
+            Assert.Equal(phoneSession, invite.GetProperty("sessionId").GetString());
             var callId = invite.GetProperty("callId").GetString();
             await SendText(agent, new { type = "call.accept", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
             var accepted = await ReceiveJson(control);
@@ -635,8 +643,65 @@ public sealed class CallTests
             Assert.Equal("active", (await ReceiveJson(audio)).GetProperty("status").GetString());
             Assert.Equal("call.accepted", (await ReceiveJson(agent)).GetProperty("type").GetString());
             Assert.Equal("call.active", (await ReceiveJson(agent)).GetProperty("type").GetString());
+            using var android = await phoneHttp.PostAsJsonAsync("/api/v1/calls", new
+            {
+                sourceId = source.Id, sessionId = "selected-chat", mode = "conversation"
+            });
+            android.EnsureSuccessStatusCode();
+            var androidId = (await android.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString();
+            var androidInvite = (await ReceiveJson(agent)).GetProperty("payload");
+            Assert.Equal(androidId, androidInvite.GetProperty("callId").GetString());
+            Assert.Equal("selected-chat", androidInvite.GetProperty("sessionId").GetString());
+            await SendText(agent, new { type = "call.accept", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId = androidId } });
+            await WaitStatus(phoneHttp, androidId!, "connecting");
+            using var androidAudio = await Ws(app, Token(phoneHttp)).ConnectAsync(
+                new Uri($"ws://localhost/api/v1/calls/{androidId}/audio"), resources.Token);
+            Assert.Equal("active", (await ReceiveJson(androidAudio)).GetProperty("status").GetString());
+            Assert.Equal("call.active", (await ReceiveJson(agent)).GetProperty("type").GetString());
+            await Task.WhenAll(SendUtterance(audio), SendUtterance(androidAudio));
+            var expectedSessions = new Dictionary<string, string>
+            {
+                [callId!] = phoneSession, [androidId!] = "selected-chat"
+            };
+            while (expectedSessions.Count != 0)
+            {
+                var frame = await ReceiveJson(agent);
+                if (frame.GetProperty("type").GetString() != "dialog.user") continue;
+                var turn = frame.GetProperty("payload");
+                var id = turn.GetProperty("callId").GetString()!;
+                Assert.True(expectedSessions.Remove(id, out var sessionId));
+                Assert.Equal(sessionId, turn.GetProperty("sessionId").GetString());
+                await SendText(agent, new
+                {
+                    type = "call.say", protocolVersion = CallService.Protocol, eventId = Wire.Id(),
+                    payload = new { callId = id, sessionId, turnId = turn.GetProperty("turnId").GetString(), text = "Ответ агента" }
+                });
+            }
+            await Task.WhenAll(ExpectSpeech(audio), ExpectSpeech(androidAudio));
             await SendText(control, new { type = "ended", callId, reason = "ended" });
-            Assert.Equal("call.ended", (await ReceiveJson(agent)).GetProperty("type").GetString());
+            var ended = await ReceiveJson(agent);
+            Assert.Equal("call.ended", ended.GetProperty("type").GetString());
+            Assert.Equal(phoneSession, ended.GetProperty("payload").GetProperty("sessionId").GetString());
+            await WaitStatus(phoneHttp, androidId!, "active");
+            Assert.Equal(HttpStatusCode.NoContent, (await phoneHttp.PostAsync($"/api/v1/calls/{androidId}/end", null)).StatusCode);
+            Assert.Equal("selected-chat", (await ReceiveJson(agent)).GetProperty("payload").GetProperty("sessionId").GetString());
+        }
+
+        static async Task SendUtterance(WebSocket socket)
+        {
+            for (uint index = 0; index < 60; index++)
+                await SendBinary(socket, Frame(index, index * 20, index < 20 ? (byte)0x33 : (byte)0));
+        }
+
+        static async Task ExpectSpeech(WebSocket socket)
+        {
+            for (var index = 0; index < 12; index++)
+            {
+                var (type, _) = await ReceiveAny(socket);
+                if (type == WebSocketMessageType.Binary) return;
+                Assert.Equal(WebSocketMessageType.Text, type);
+            }
+            Assert.Fail("Expected synthesized audio on the call's media socket.");
         }
     }
 

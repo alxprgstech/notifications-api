@@ -601,7 +601,7 @@ internal static class OpenApiDocs
             """{"sourceId":"abcdef0123456789abcdef0123456789","sessionId":"task-1","securityLevel":"elevated"}"""));
 
         Add("POST", "/api/v1/calls", new("startCall", "Звонки", "Начать исходящий звонок",
-            "Создаёт исходящий звонок владельца агенту. Одновременно допускается один звонок; второй получает 409 `busy`. Elevated требует `challengeId` и `signature`; для standard эти поля должны отсутствовать. `mode=one_shot` — обычный живой звонок с ретрансляцией медиа; `mode=conversation` — разговор без кнопки «Говорить»: сервер распознаёт русскую речь локально, передаёт реплики только в выбранную `sessionId` агента и озвучивает ответ серверным Silero. Conversation требует настроенный STT (`503 stt_unavailable`). Сервер отправляет агенту `call.invite`; звонок переходит в `connecting` после `call.accept` агента. Медиа — отдельный WebSocket.",
+            "Создаёт исходящий звонок владельца агенту. Второй обычный звонок получает 409 `busy`. Входящий SIP-вызов помощника может идти параллельно со звонком Android. Elevated требует `challengeId` и `signature`; для standard эти поля должны отсутствовать. `mode=one_shot` — обычный живой звонок с ретрансляцией медиа; `mode=conversation` — разговор без кнопки «Говорить»: сервер распознаёт русскую речь локально, передаёт реплики только в выбранную `sessionId` агента и озвучивает ответ серверным Silero. Conversation требует настроенный STT (`503 stt_unavailable`). Сервер отправляет агенту `call.invite`; звонок переходит в `connecting` после `call.accept` агента. Медиа — отдельный WebSocket.",
             ApiAuth.Bearer, [Ok<CallViewResponse>("Звонок создан и приглашение отправлено агенту."), .. callErrors],
             RequestBodyKind.Json, "Параметры исходящего звонка.",
             """{"sourceId":"abcdef0123456789abcdef0123456789","sessionId":"task-1","securityLevel":"standard","mode":"conversation"}"""));
@@ -801,7 +801,7 @@ internal static class OpenApiDocs
                 RateLimited, InternalError]));
 
         Add("GET", "/api/v1/telephony/assistant", new("getPhoneAssistantRoute", "Звонки", "Маршрут телефонного помощника",
-            "Возвращает внутренний номер выделенному агенту телефонного помощника. Требуется токен интеграции с правом `agents:connect`.",
+            "Возвращает внутренний номер агенту Notify Desktop, привязанному к телефонному маршруту. Требуется токен интеграции с правом `agents:connect`.",
             ApiAuth.Bearer, [
                 Ok<PhoneAssistantRouteResponse>("Внутренний номер Asterisk.", """{"extension":"7820"}"""),
                 Unauthorized,

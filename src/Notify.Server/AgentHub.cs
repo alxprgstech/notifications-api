@@ -32,15 +32,19 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         public string[] Capabilities { get; set; } = agent.Capabilities;
         public string[] CallProtocols { get; set; } = agent.CallProtocols ?? [];
         public string? CallProtocol { get; set; } = agent.CallProtocol;
+        public volatile bool Ready;
         public long LastSeen { get; set; } = Wire.Now;
     }
 
-    public bool IsOnline(string agentId) => connections.ContainsKey(agentId);
+    public bool IsOnline(string agentId) => FindOnline(agentId) is not null;
     public (Agent Agent, string[] Capabilities, AgentSession[] Sessions, string[] CallProtocols, string? CallProtocol)? Online(string agentId) =>
-        connections.TryGetValue(agentId, out var connection) ? (connection.Agent, connection.Capabilities, connection.Sessions, connection.CallProtocols, connection.CallProtocol) : null;
+        FindOnline(agentId) is { } connection ? (connection.Agent, connection.Capabilities, connection.Sessions, connection.CallProtocols, connection.CallProtocol) : null;
+    private Connection? FindOnline(string agentId) =>
+        connections.TryGetValue(agentId, out var connection) && connection.Ready && !connection.Closing.IsCancellationRequested
+            ? connection : null;
     public async Task<bool> SendControlAsync(string agentId, string type, object payload, CancellationToken ct = default)
     {
-        if (!connections.TryGetValue(agentId, out var connection)) return false;
+        if (FindOnline(agentId) is not { } connection) return false;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
         try
@@ -68,7 +72,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         actor.RequireOwner();
         return db.Run((c, t) => All<Agent>(c, t, "agent").Select(agent =>
         {
-            var live = !agent.Revoked && connections.TryGetValue(agent.Id, out var found) ? found : null;
+            var live = !agent.Revoked ? FindOnline(agent.Id) : null;
             return (object)new { agent.Id, agent.SourceId, agent.Name, agent.Capabilities, CallProtocols = live?.CallProtocols ?? agent.CallProtocols ?? [], CallProtocol = live?.CallProtocol ?? agent.CallProtocol, agent.Revoked, online = live != null, lastSeenAt = agent.LastSeenAt, sessions = live?.Sessions ?? Array.Empty<AgentSession>() };
         }).ToList());
     }
@@ -144,6 +148,9 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
             if (hello.TryGetProperty("client", out var client) && client.ValueKind == JsonValueKind.String &&
                 client.GetString() == "alxprgs-notify-harness-check")
                 throw new AgentProtocolException("use_agents_self_for_diagnostics");
+            if (!connections.TryAdd(agent.Id, connection))
+                throw new AgentProtocolException("agent_already_connected");
+            registered = true;
             db.Run((c, t) =>
             {
                 if (Get<Source>(c, t, "source", agent.SourceId) is not { Revoked: false } source ||
@@ -157,16 +164,6 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
                 Exec(c, t, "UPDATE agent_commands SET status='queued' WHERE agent_id=$a AND status='sent'", ("$a", agent.Id));
                 return 0;
             });
-            while (!connections.TryAdd(agent.Id, connection))
-            {
-                if (!connections.TryGetValue(agent.Id, out var existing)) continue;
-                if (connections.TryUpdate(agent.Id, connection, existing))
-                {
-                    existing.Closing.Cancel();
-                    break;
-                }
-            }
-            registered = true;
             await SendJsonAsync(connection, new
             {
                 eventId = Wire.Id(), protocolVersion = Protocol, type = "hello_ack", serverTime = Wire.Now,
@@ -174,6 +171,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
                 agent = new { agent.Id, agent.Name }, callProtocol = connection.CallProtocol,
                 supportedCallProtocols = CallService.SupportedProtocols, pendingCommands = CountPending(agent.Id)
             }, lifetime.Token);
+            connection.Ready = true;
             await SendPendingAsync(connection, lifetime.Token);
             await ReadLoopAsync(connection, lifetime.Token);
         }
@@ -190,12 +188,15 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         finally
         {
             connection.Closing.Cancel();
-            // Compare and remove atomically: a replacement must survive this connection's cleanup.
-            if (registered && connections.TryRemove(new KeyValuePair<string, Connection>(agent.Id, connection)))
+            if (registered)
             {
-                db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { LastSeenAt = Wire.Now }); return 0; });
+                try
+                {
+                    if (DisconnectedEvent is { } disconnected) { try { await disconnected(agent); } catch { } }
+                    db.Run((c, t) => { var stored = Get<Agent>(c, t, "agent", agent.Id); if (stored != null) Put(c, t, "agent", stored.Id, stored with { LastSeenAt = Wire.Now }); return 0; });
+                }
+                finally { connections.TryRemove(agent.Id, out _); }
             }
-            if (registered && DisconnectedEvent is { } disconnected) { try { await disconnected(agent); } catch { } }
             try
             {
                 using var closeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -261,7 +262,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
 
     private async Task SendPendingAsync(string agentId, CancellationToken ct)
     {
-        if (!connections.TryGetValue(agentId, out var connection)) return;
+        if (FindOnline(agentId) is not { } connection) return;
         await SendPendingAsync(connection, ct);
     }
     private async Task SendPendingAsync(Connection connection, CancellationToken ct)

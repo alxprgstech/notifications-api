@@ -69,26 +69,26 @@ exten => 7820,1,Stasis(alxprgs-notify,phone-assistant,7820)
 ```
 
 Мост проверяет контекст, номер и PJSIP-канал. Вызов должен входить в Stasis до `Answer()`.
-Мост отвечает после подтверждения выделенного агента и открытия медиа Notify.
+Мост отвечает после подтверждения агента Notify Desktop и открытия медиа Notify.
 
 ```dotenv
 ASTERISK_ASSISTANT_EXTENSION=7820
 ASTERISK_ASSISTANT_CONTEXT=notify-trusted
 ```
 
-Создайте отдельный источник `agents:connect` и зарегистрируйте агента `realtime_audio` в кабинете.
+Используйте существующий источник Notify Desktop с правом `agents:connect` и его зарегистрированного агента.
 Настройте Notify через существующий Docker env-файл:
 
 ```dotenv
 Notify__PhoneAssistantExtension=7820
 Notify__PhoneAssistantBridgeSourceId=<source-id моста telephony:bridge>
-Notify__PhoneAssistantAgentId=<agent-id выделенного агента>
+Notify__PhoneAssistantAgentId=5fd8c4b0cb0442e1b323eb370a07a1a9
 ```
 
 Сделайте резервные копии файлов Asterisk и данных Notify перед перезагрузкой конфигурации.
-В Notify Desktop сохраните токен источника в **Настройки → Телефонный помощник**.
+Подключите обычный чат в Notify Desktop и включите **Настройки → Телефонный помощник**.
 Войдите в Codex CLI через ChatGPT. App Server возобновляет отдельную сессию `Notify Phone Assistant`
-по сохранённому ID. Если помощник недоступен или идёт разговор, новый SIP-вызов завершается
+по сохранённому ID. Если помощник недоступен или SIP-канал занят, новый SIP-вызов завершается
 до ответа. Для отключения маршрута уберите номер из серверной конфигурации.
 
 Для замеров включите `Notify__PhoneAssistantTiming=true` на сервере и `NOTIFY_PHONE_TIMING=1`

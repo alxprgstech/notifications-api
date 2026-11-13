@@ -128,6 +128,10 @@ public sealed class AgentTests
         var close = await ReceiveClose(probe, timeout.Token);
         Assert.Equal("use_agents_self_for_diagnostics", close.CloseStatusDescription);
         await probe.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", timeout.Token);
+        using var duplicate = await Client(app, Token(sourceClient)).ConnectAsync(address, timeout.Token);
+        await Send(duplicate, Hello("runtime"));
+        Assert.Equal("agent_already_connected", (await ReceiveClose(duplicate, timeout.Token)).CloseStatusDescription);
+        await duplicate.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", timeout.Token);
         await Send(active, new { type = "heartbeat", protocolVersion = AgentHub.Protocol, eventId = Wire.Id() });
         Assert.Equal("heartbeat_ack", (await Receive(active, timeout.Token)).GetProperty("type").GetString());
         Assert.Equal(0, Volatile.Read(ref disconnects));

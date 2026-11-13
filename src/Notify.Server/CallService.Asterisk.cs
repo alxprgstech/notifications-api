@@ -11,6 +11,9 @@ public sealed partial class CallService
     internal const string BridgeScope = "telephony:bridge";
     private const string PhoneAssistantSession = "notify-phone-assistant";
 
+    internal static bool IsOrdinarySession(AgentSession[] sessions, string id) =>
+        id != PhoneAssistantSession && sessions.Any(session => session.Id == id);
+
     private sealed class SipPeer(string sourceId, WebSocket socket)
     {
         public string SourceId { get; } = sourceId;
@@ -125,13 +128,19 @@ public sealed partial class CallService
         catch (Exception error) when (error is WebSocketException or OperationCanceledException or JsonException or InvalidOperationException or KeyNotFoundException) { }
         finally
         {
-            Call? active;
+            Call[] affected;
             lock (sync)
             {
                 if (sipPeer == peer) sipPeer = null;
-                active = currentId == null ? null : calls.GetValueOrDefault(currentId);
+                affected = calls.Values.Where(call => call.Sip == peer && !call.Ended).ToArray();
             }
-            if (active?.Sip == peer) await EndAsync(active, "disconnected");
+            await Task.WhenAll(affected.Select(call => EndAsync(call, "disconnected")));
+            if (socket.State == WebSocketState.CloseReceived)
+            {
+                using var closing = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                try { await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", closing.Token); }
+                catch (Exception error) when (error is WebSocketException or OperationCanceledException) { }
+            }
         }
     }
 
@@ -158,17 +167,18 @@ public sealed partial class CallService
             if (!stt.Enabled) throw new Fault(503, "stt_unavailable");
             lock (sync)
             {
-                if (peer != sipPeer || currentId != null) throw new Fault(409, "busy");
+                if (peer != sipPeer || phoneAssistantCallId != null ||
+                    (currentId is { } id && calls[id].Sip != null)) throw new Fault(409, "busy");
                 if (agents.Online(settings.PhoneAssistantAgentId) is not { } online ||
                     online.CallProtocol != Protocol || !online.Capabilities.Contains("realtime_audio") ||
                     !online.Sessions.Any(session => session.Id == PhoneAssistantSession) ||
                     online.Agent.SourceId == peer.SourceId)
                     throw new Fault(409, "agent_offline");
-                call = new Call(Wire.Id(), Wire.Id(), "outgoing", peer.SourceId, online.Agent.Id, online.Agent.Name,
+                call = new Call(Wire.Id(), Wire.Id(), "outgoing", online.Agent.SourceId, online.Agent.Id, online.Agent.Name,
                     null, PhoneAssistantSession, "standard", "Notify Phone Assistant", null,
                     mode: "conversation", target: "asterisk", sip: peer, phoneAssistant: true);
                 calls.Add(call.Id, call);
-                currentId = call.Id;
+                phoneAssistantCallId = call.Id;
             }
             _ = RingTimerAsync(call);
             if (!await agents.SendControlAsync(call.AgentId, "call.invite", new

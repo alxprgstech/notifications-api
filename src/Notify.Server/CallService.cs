@@ -24,6 +24,7 @@ public sealed partial class CallService
     private readonly object sync = new();
     private readonly Dictionary<string, Call> calls = new();
     private string? currentId;
+    private string? phoneAssistantCallId;
     private SipPeer? sipPeer;
 
     public CallService(AgentHub agents, Database db, Settings settings, ILogger<CallService> log, IPushSender push,
@@ -65,17 +66,19 @@ public sealed partial class CallService
         public ConversationState? Conversation;
     }
 
-    internal void EnsureIdle()
+    internal void EnsureIdle(string target)
     {
-        lock (sync) { if (currentId != null) throw new Fault(409, "busy"); }
+        lock (sync) { if (IsBusy(target)) throw new Fault(409, "busy"); }
     }
+
+    private bool IsBusy(string? target) => currentId != null || (target == "asterisk" && phoneAssistantCallId != null);
 
     internal object StartPlayback(Actor actor, string title, string text, ReadOnlyMemory<byte> pcm, string attemptId, string fingerprint, string? agentId = null, string? agentName = null, string target = "android")
     {
         Call call;
         lock (sync)
         {
-            if (currentId != null) throw new Fault(409, "busy");
+            if (IsBusy(target)) throw new Fault(409, "busy");
             var sip = ResolveTarget(target);
             call = db.Run((c, t) =>
             {
@@ -170,7 +173,7 @@ public sealed partial class CallService
                 if (existing.Fingerprint != fingerprint) throw new Fault(409, "idempotency_conflict");
                 return State(actor, existing.CallId);
             }
-            if (currentId != null) throw new Fault(409, "busy");
+            if (IsBusy(target)) throw new Fault(409, "busy");
             var sip = ResolveTarget(target);
             call = db.Run((c, t) =>
             {
@@ -211,7 +214,7 @@ public sealed partial class CallService
         var online = agents.Online(agent.Id) ?? throw new Fault(409, "agent_offline");
         if (!online.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) throw new Fault(409, "agent_unsupported");
         if (online.CallProtocol != Protocol) throw new Fault(409, "call_protocol_unsupported");
-        if (input.SessionId != null && online.Sessions.All(s => s.Id != input.SessionId)) throw new Fault(400, "invalid_session");
+        if (input.SessionId != null && !IsOrdinarySession(online.Sessions, input.SessionId)) throw new Fault(400, "invalid_session");
         return CreateChallenge(actor, "outgoing", "start", input.SourceId, agent.Id, input.SessionId, null, null, "elevated");
     }
     public object ChallengeIncoming(Actor actor, string callId)
@@ -246,7 +249,7 @@ public sealed partial class CallService
         var online = agents.Online(agent.Id) ?? throw new Fault(409, "agent_offline");
         if (!online.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) throw new Fault(409, "agent_unsupported");
         if (online.CallProtocol != Protocol) throw new Fault(409, "call_protocol_unsupported");
-        if (input.SessionId != null && online.Sessions.All(s => s.Id != input.SessionId)) throw new Fault(400, "invalid_session");
+        if (input.SessionId != null && !IsOrdinarySession(online.Sessions, input.SessionId)) throw new Fault(400, "invalid_session");
         lock (sync) { if (currentId != null) throw new Fault(409, "busy"); }
         if (input.SecurityLevel == "elevated") VerifyChallenge(actor, input.ChallengeId, input.Signature, "outgoing", "start", input.SourceId, agent.Id, input.SessionId, null, null, "elevated");
         else if (input.ChallengeId != null || input.Signature != null) throw new Fault(400, "invalid_call");
@@ -322,7 +325,7 @@ public sealed partial class CallService
         {
             await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "stt_unavailable" }); return;
         }
-        if (sessionId != null && online.Value.Sessions.All(s => s.Id != sessionId))
+        if (sessionId != null && !IsOrdinarySession(online.Value.Sessions, sessionId))
         {
             await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "invalid_session" }); return;
         }
@@ -345,7 +348,7 @@ public sealed partial class CallService
         lock (sync)
         {
             if (target == "asterisk" && sipPeer == null) failure = "asterisk_unavailable";
-            else if (currentId == null)
+            else if (!IsBusy(target))
             {
                 call = new Call(Wire.Id(), Wire.Id(), "incoming", agent.SourceId, agent.Id, online.Value.Agent.Name, null, sessionId, security, string.IsNullOrWhiteSpace(title) ? online.Value.Agent.Name : title, iconId, mode: mode, target: target!, sip: target == "asterisk" ? sipPeer : null);
                 calls[call.Id] = call; currentId = call.Id;
@@ -434,8 +437,9 @@ public sealed partial class CallService
     {
         try
         {
-            Call? call; lock (sync) call = calls.Values.FirstOrDefault(c => c.SourceId == sourceId && !c.Ended);
-            if (call != null) await EndAsync(call, "revoked");
+            Call[] affected;
+            lock (sync) affected = calls.Values.Where(c => (c.SourceId == sourceId || c.Sip?.SourceId == sourceId) && !c.Ended).ToArray();
+            await Task.WhenAll(affected.Select(call => EndAsync(call, "revoked")));
         }
         catch (Exception e) { log.LogWarning("Source revoke call cleanup failed: {Type}", e.GetType().Name); }
     }
@@ -644,6 +648,8 @@ public sealed partial class CallService
             if (callId == null) return;
             Call? call; lock (sync) calls.TryGetValue(callId, out call);
             if (call == null || !call.Playback.IsEmpty || call.AgentId != agent.Id) return;
+            if (payload.TryGetProperty("sessionId", out var session) &&
+                (session.ValueKind is not (JsonValueKind.String or JsonValueKind.Null) || session.GetString() != call.SessionId)) return;
             switch (type)
             {
                 case "call.accept": await AcceptByAgentAsync(call); break;
@@ -769,7 +775,7 @@ public sealed partial class CallService
         _ = phone?.TextAsync(Wire.Encode(new { type = "interrupt", generation }));
         _ = phone?.TextAsync(Wire.Encode(new { type = "conversation", status = "listening" }));
         if (call.UsesAgent)
-            _ = agents.SendControlAsync(call.AgentId, "call.interrupted", new { callId = call.Id, generation, reason = "user_speech" });
+            _ = agents.SendControlAsync(call.AgentId, "call.interrupted", new { callId = call.Id, sessionId = call.SessionId, generation, reason = "user_speech" });
     }
 
     private void FinalizeUtterance(Call call, ConversationState state)
@@ -999,8 +1005,9 @@ public sealed partial class CallService
     }
     private async Task HandleAgentDisconnected(Agent agent)
     {
-        Call? call; lock (sync) call = calls.Values.FirstOrDefault(c => c.AgentId == agent.Id && !c.Ended);
-        if (call != null) await EndAsync(call, "disconnected");
+        Call[] affected;
+        lock (sync) affected = calls.Values.Where(c => c.AgentId == agent.Id && !c.Ended).ToArray();
+        await Task.WhenAll(affected.Select(call => EndAsync(call, "disconnected")));
     }
 
     private async Task RingTimerAsync(Call call)
@@ -1028,6 +1035,7 @@ public sealed partial class CallService
             if (call.Ended || expectedStatus != null && call.Status != expectedStatus) return false;
             call.Ended = true; call.Status = "ended"; call.Reason = reason; call.EndedAt = Wire.Now;
             if (currentId == call.Id) currentId = null;
+            if (phoneAssistantCallId == call.Id) phoneAssistantCallId = null;
             phone = call.Phone; agentMedia = call.AgentMedia; deviceId = call.DeviceId;
         }
         call.AgentDecision?.TrySetResult(false);
@@ -1052,7 +1060,7 @@ public sealed partial class CallService
             if (call.Direction == "incoming" && call.Target == "android") _ = PushCallAsync(call, reason is "rejected" or "missed" or "disconnected" or "revoked" ? reason : "ended");
             await CallShutdown.RunAsync(
                 ct => call.UsesAgent && call.Playback.IsEmpty
-                    ? agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, reason }, ct)
+                    ? agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, sessionId = call.SessionId, reason }, ct)
                     : Task.CompletedTask,
                 ct => phone?.TextAsync(Wire.Encode(new { type = "ended", reason }), ct) ?? Task.CompletedTask,
                 () => CloseSide(phone, reason), () => CloseSide(agentMedia, reason),
