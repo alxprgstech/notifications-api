@@ -14,7 +14,7 @@ from io import BytesIO
 import aiohttp
 
 
-async def call(samples, host, number):
+async def call(samples, host, number, require_ringback=False):
     sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     for sock in (sip, rtp):
@@ -42,6 +42,7 @@ async def call(samples, host, number):
     body = "\r\n".join(["v=0", "o=phone 1 1 IN IP4 127.0.0.1", "s=Notify test", "c=IN IP4 127.0.0.1",
                           "t=0 0", f"m=audio {rtp.getsockname()[1]} RTP/AVP 0", "a=rtpmap:0 PCMU/8000", ""])
     before = time.monotonic()
+    ringing_ms = None
     await signal("INVITE", remote, body)
     try:
         async with asyncio.timeout(15):
@@ -51,6 +52,8 @@ async def call(samples, host, number):
                 if not response.startswith("SIP/2.0 "):
                     continue
                 status = int(response[8:11])
+                if status == 180 and ringing_ms is None:
+                    ringing_ms = (time.monotonic() - before) * 1000
                 if status >= 200:
                     break
         if status != 200:
@@ -61,6 +64,10 @@ async def call(samples, host, number):
         port = int(re.search(r"(?m)^m=audio (\d+)", response)[1])
         await signal("ACK", contact)
         answer_ms = (time.monotonic() - before) * 1000
+        if require_ringback and ringing_ms is None:
+            cseq += 1
+            await signal("BYE", contact)
+            raise RuntimeError("SIP 180 Ringing was not received before 200 OK")
 
         async def listen():
             while True:
@@ -84,6 +91,7 @@ async def call(samples, host, number):
                 ts = (ts + 160) & 4294967295
                 if heard.done():
                     return {"sipAnswerMs": round(answer_ms, 2),
+                            "sipRingingMs": None if ringing_ms is None else round(ringing_ms, 2),
                             "lastVoiceToFirstNonSilentRtpMs": round((heard.result() - last_voice) * 1000, 2)}
                 tick += .02
                 await asyncio.sleep(max(0, tick - loop.time()))
@@ -103,6 +111,7 @@ async def main():
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--number", default="7820")
     parser.add_argument("--silero", default="http://silero:8080")
+    parser.add_argument("--require-ringback", action="store_true")
     args = parser.parse_args()
     async with aiohttp.ClientSession() as http:
         async with http.post(args.silero + "/synthesize", json={"text": "Скажи коротко, сколько будет два плюс два."}) as response:
@@ -111,13 +120,17 @@ async def main():
     with wave.open(BytesIO(data)) as wav:
         pcm, _ = audioop.ratecv(wav.readframes(wav.getnframes()), 2, 1, 16000, 8000, None)
     frames = [bytes(320)] * 10 + [pcm[i:i + 320].ljust(320, b"\0") for i in range(0, len(pcm), 320)]
+    failed = False
     for _ in range(args.samples):
         try:
-            result = await call(frames, "127.0.0.1", args.number)
+            result = await call(frames, "127.0.0.1", args.number, args.require_ringback)
         except (TimeoutError, RuntimeError) as error:
+            failed = True
             result = {"error": str(error)}
         print(json.dumps(result), flush=True)
         await asyncio.sleep(1)
+    if args.require_ringback and failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
