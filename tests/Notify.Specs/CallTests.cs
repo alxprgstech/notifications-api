@@ -417,7 +417,10 @@ public sealed class CallTests
             var phoneAttachment = calls.AttachPhoneAsync(new Actor("device", phone.Id, []), callId, phoneMedia, CancellationToken.None);
             var agentAttachment = calls.AttachAgentAsync(new Actor("integration", source.Id, ["agents:connect"]), callId, agentMedia, CancellationToken.None);
             await WaitStatus(phoneClient, callId, "active");
-            agentMedia.Push(Frame(0, 0, 0x11)); agentMedia.Push(Frame(1, 20, 0x22));
+            agentMedia.Push(Frame(0, 0, 0x11));
+            await phoneMedia.Blocked.WaitAsync(TimeSpan.FromSeconds(5));
+            agentMedia.Push(Frame(1, 20, 0x22));
+            agentMedia.Push(Frame(2, 40, 0x33));
             await WaitStatus(phoneClient, callId, "ended");
             using var state = JsonDocument.Parse(await phoneClient.GetStringAsync("/api/v1/calls/" + callId)); Assert.Equal("degraded", state.RootElement.GetProperty("reason").GetString());
             await Task.WhenAll(phoneAttachment, agentAttachment).WaitAsync(TimeSpan.FromSeconds(5));
