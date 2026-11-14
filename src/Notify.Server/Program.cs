@@ -214,6 +214,7 @@ api.MapGet("/calls", (HttpContext c, CallService calls) => calls.History(Auth.Ac
 api.MapGet("/calls/incoming", (HttpContext c, CallService calls) => calls.Incoming(Auth.Actor(c)));
 api.MapGet("/calls/{id}", (string id, HttpContext c, CallService calls) => calls.State(Auth.Actor(c), id));
 api.MapGet("/calls/{id}/transcript", (string id, HttpContext c, CallService calls) => calls.Transcript(Auth.Actor(c), id));
+api.MapGet("/calls/{id}/trace", (string id, HttpContext c, CallService calls) => calls.TraceFor(Auth.Actor(c), id));
 api.MapPost("/calls/{id}/challenge", (string id, HttpContext c, CallService calls) => calls.ChallengeIncoming(Auth.Actor(c), id));
 api.MapPost("/calls/{id}/accept", async (string id, CallAcceptInput input, HttpContext c, CallService calls) => await calls.AcceptAsync(Auth.Actor(c), id, input));
 api.MapPost("/calls/{id}/reject", async (string id, HttpContext c, CallService calls) => { await calls.RejectAsync(Auth.Actor(c), id); return Results.NoContent(); });

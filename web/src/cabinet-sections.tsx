@@ -23,6 +23,9 @@ export type Call = {
   startedAt: number; status: string; reason?: string; durationMs: number; direction?: string;
   mode?: string; hasTranscript?: boolean; transcriptPartial?: boolean;
 };
+type CallTraceEvent = { sequence: number; stage: string; status: string; source: string; offsetMs: number;
+  turnId?: string; durationMs?: number; code?: string; frames?: number; receivedFrames?: number; droppedFrames?: number; tokens?: number };
+type CallTrace = { events: CallTraceEvent[]; truncated: boolean };
 export type ManagementInput =
   | { action: 'chatgpt.link' }
   | { action: 'chatgpt.permissions.update'; targetId: string; expectedRevision: number; scopes: string[] }
@@ -277,6 +280,18 @@ export function Devices({ devices, busy, open, blocked }: {
 export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agents: Agent[]; sources: Source[]; blocked: boolean }) {
   const [transcripts, setTranscripts] = useState<Record<string, { turns: { id: string; speaker: string; text: string; status?: string; error?: string }[]; partial: boolean; error?: string }>>({});
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
+  const [traces, setTraces] = useState<Record<string, CallTrace | 'missing' | 'loading' | 'failed'>>({});
+  const loadTrace = async (id: string) => {
+    if (traces[id] === 'loading') return;
+    setTraces(current => ({ ...current, [id]: 'loading' }));
+    try {
+      const response = await fetch(`/api/v1/calls/${id}/trace`, { credentials: 'same-origin' });
+      const value = response.status === 404 ? 'missing' : response.ok ? await response.json() as CallTrace : 'failed';
+      setTraces(current => ({ ...current, [id]: value }));
+    } catch {
+      setTraces(current => ({ ...current, [id]: 'failed' }));
+    }
+  };
   const loadTranscript = async (id: string) => {
     if (transcripts[id] !== undefined || transcriptErrors[id] !== undefined) return;
     try {
@@ -305,6 +320,7 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
       const duration = seconds < 60 ? seconds + ' с' : Math.floor(seconds / 60) + ' мин ' + seconds % 60 + ' с';
       const transcript = transcripts[call.id];
       const transcriptError = transcriptErrors[call.id];
+      const trace = traces[call.id];
       return <li key={call.id}>
         <span className="entity-icon accent"><Icon name="call" /></span>
         <div className="call-party"><strong>{peer}</strong><p>{direction} · {dateTime.format(call.startedAt)}</p></div>
@@ -314,8 +330,15 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
             {transcript === undefined && transcriptError === undefined && <p>Загружаем…</p>}
             {transcriptError !== undefined && <p>Не удалось загрузить: {transcriptError}</p>}
             {transcript?.partial === true && <p>Распознано неполно; полученные реплики сохранены.</p>}
-            {transcript?.turns.map(turn => <p key={turn.id}><strong>{turn.speaker === 'user' ? 'Вы' : 'Агент'}:</strong> {turn.status === 'error' ? `ошибка распознавания (${turn.error ?? 'unknown'})` : turn.text}</p>)}
+            {transcript?.turns.map(turn => <p key={turn.id}><strong>{turn.speaker === 'user' ? 'Вы' : 'Агент'}:</strong> {turn.text} {turn.status === 'error' ? `(${turn.error ?? 'Ошибка'})` : ''}</p>)}
           </details>}
+          <details onToggle={event => { if (event.currentTarget.open) void loadTrace(call.id); }}>
+            <summary>Таймлайн и этапы</summary>
+            {(trace === undefined || trace === 'loading') && <p>Загружаем…</p>}
+            {trace === 'missing' && <p>Нет данных об этапах.</p>}
+            {trace === 'failed' && <p>Не удалось загрузить этапы.</p>}
+            {typeof trace === 'object' && <CallTraceView trace={trace} />}
+          </details>
         </div>
         <Badge tone={call.securityLevel === 'elevated' ? 'info' : 'neutral'}>
           {call.securityLevel === 'elevated' && <Icon name="shield" size={14} />}
@@ -323,6 +346,28 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
         </Badge>
       </li>;
     })}</ul>}
+  </>;
+}
+
+function CallTraceView({ trace }: { trace: CallTrace }) {
+  if (!trace.events.length) return <p>Нет данных об этапах.</p>;
+  const end = Math.max(1, ...trace.events.map(event => event.offsetMs));
+  return <>
+    {trace.truncated && <p>Достигнут предел записи событий.</p>}
+    <div className="call-trace-scale" aria-label="Временные отметки звонка">
+      {trace.events.map(event => <span key={event.sequence} title={`${event.stage} · +${Math.round(event.offsetMs)} мс`}
+        style={{ left: `${event.offsetMs / end * 100}%`, top: event.source === 'asterisk' ? 2 : event.source === 'agent' ? 12 : 22 }}
+        className={event.status === 'failed' ? 'call-trace-failure' : undefined} />)}
+    </div>
+    <ol className="call-trace-events">{trace.events.map(event => <li key={event.sequence}>
+      <details><summary>{event.stage} · {event.status} · +{Math.round(event.offsetMs)} мс</summary>
+        <p>{event.source} · {event.durationMs == null ? 'Длительность недоступна' : `${Math.round(event.durationMs)} мс`} {event.code ?? ''}</p>
+        {event.turnId && <p>Реплика {event.turnId}</p>}
+        {(event.frames != null || event.receivedFrames != null || event.droppedFrames != null) && <p>
+          Кадры · отправлено {event.frames ?? '—'} · принято {event.receivedFrames ?? '—'} · отклонено {event.droppedFrames ?? '—'}</p>}
+        {event.tokens != null && <p>Токены · {event.tokens}</p>}
+      </details>
+    </li>)}</ol>
   </>;
 }
 

@@ -22,6 +22,8 @@ class RtpPeer(asyncio.DatagramProtocol):
         self.incoming = asyncio.Queue(50)
         self.remote = None
         self.last_packet = None
+        self.pending = bytearray()
+        self.received = self.sent = self.dropped = 0
         self.sequence = secrets.randbits(16)
         self.timestamp = secrets.randbits(32)
         self.ssrc = secrets.randbits(32)
@@ -32,23 +34,53 @@ class RtpPeer(asyncio.DatagramProtocol):
         self.transport = transport
 
     def datagram_received(self, data, addr):
-        if addr != self.remote or len(data) < 12 or data[0] != 0x80 or data[1] & 0x7f:
+        if addr != self.remote:
+            return
+        if len(data) < RTP.size or data[0] >> 6 != 2 or data[1] & 0x7f:
+            self.dropped += 1
+            return
+        offset = RTP.size + 4 * (data[0] & 0x0f)
+        end = len(data)
+        if data[0] & 0x20:
+            padding = data[-1]
+            if not padding:
+                self.dropped += 1
+                return
+            end -= padding
+        if data[0] & 0x10:
+            if offset + 4 > end:
+                self.dropped += 1
+                return
+            offset += 4 + 4 * int.from_bytes(data[offset + 2:offset + 4], "big")
+        if not 0 < end - offset <= 960:
+            self.dropped += 1
             return
         _, _, seq, _, ssrc = RTP.unpack_from(data)
         if self.last_packet and ssrc == self.last_packet[0]:
             distance = (seq - self.last_packet[1]) & 0xffff
             if distance == 0 or distance > 0x7fff:
+                self.dropped += 1
                 return
+            self.dropped += distance - 1
+        if self.last_packet and (ssrc != self.last_packet[0] or distance != 1):
+            self.pending.clear()
+            self.decode_state = None
         self.last_packet = (ssrc, seq)
-        if len(data) == 172:
-            pcm, self.decode_state = audioop.ratecv(audioop.ulaw2lin(data[12:], 2), 2, 1, 8000, 16000, self.decode_state)
+        self.received += 1
+        self.pending.extend(data[offset:end])
+        while len(self.pending) >= 160:
+            pcm, self.decode_state = audioop.ratecv(audioop.ulaw2lin(self.pending[:160], 2), 2, 1, 8000, 16000, self.decode_state)
+            del self.pending[:160]
             if not self.incoming.full():
                 self.incoming.put_nowait(pcm.ljust(640, b"\0"))
+            else:
+                self.dropped += 1
 
     def send(self, pcm):
         samples, self.encode_state = audioop.ratecv(pcm, 2, 1, 16000, 8000, self.encode_state)
         header = RTP.pack(0x80, 0, self.sequence, self.timestamp, self.ssrc)
         self.transport.sendto(header + audioop.lin2ulaw(samples, 2), self.remote)
+        self.sent += 1
         self.sequence = (self.sequence + 1) & 0xffff
         self.timestamp = (self.timestamp + 160) & 0xffffffff
 
@@ -108,7 +140,7 @@ class Ari:
                 and re.fullmatch(re.escape(endpoint) + r"-[0-9a-fA-F]+", channel.get("name", "")) is not None)
 
 
-async def media(socket, rtp, playback, call_id=None):
+async def media(socket, rtp, playback, call_id=None, trace=None):
     started = time.monotonic()
     timing = call_id is not None and os.environ.get("NOTIFY_PHONE_TIMING") == "1"
     if timing:
@@ -116,37 +148,54 @@ async def media(socket, rtp, playback, call_id=None):
 
     async def upload():
         seq = 0
+        has_rtp = False
         while True:
             try:
                 pcm = await asyncio.wait_for(rtp.incoming.get(), timeout=0.020)
             except TimeoutError:
                 pcm = bytes(640)
+            else:
+                if not has_rtp:
+                    has_rtp = True
+                    if trace is not None:
+                        await trace("rtp_first_in")
             if not playback:
                 await socket.send_bytes(FRAME.pack(seq, int((time.monotonic() - started) * 1000), 0) + pcm)
                 seq += 1
 
     generation = 0
     reply = None
+    playback_turn = None
     last_voice = {}
-    sender = asyncio.create_task(upload())
-    try:
+    async def download():
+        nonlocal generation, reply, playback_turn
         async for message in socket:
-            if sender.done():
-                sender.result()
+            if message.type == aiohttp.WSMsgType.ERROR:
+                raise socket.exception() or ConnectionError("media WebSocket failed")
             if message.type == aiohttp.WSMsgType.TEXT:
                 event = message.json()
                 if event.get("type") == "interrupt":
                     generation = max(generation, event["generation"])
+                    if playback_turn is not None and playback_turn[1] < generation:
+                        playback_turn = None
                 elif timing and event.get("type") == "assistant_timing":
                     if len(last_voice) >= 16:
                         last_voice.pop(next(iter(last_voice)))
                     last_voice[event["turnId"]] = event["lastVoiceMediaMs"]
-                elif timing and event.get("status") == "speaking" and event.get("userTurnId"):
-                    reply = event["userTurnId"], event["generation"]
+                elif event.get("status") == "speaking" and event.get("userTurnId"):
+                    playback_turn = event["userTurnId"], event["generation"]
+                    if timing:
+                        reply = playback_turn
             elif message.type == aiohttp.WSMsgType.BINARY and len(message.data) == 652:
                 _, _, frame_generation = FRAME.unpack_from(message.data)
                 if frame_generation >= generation:
                     rtp.send(message.data[12:])
+                    if trace is not None:
+                        if playback_turn is not None and playback_turn[1] == frame_generation:
+                            await trace("rtp_first_out", turnId=playback_turn[0])
+                            playback_turn = None
+                        elif rtp.sent == 1:
+                            await trace("rtp_first_out")
                     if reply is not None and reply[1] == frame_generation:
                         turn_id, _ = reply
                         tick = time.monotonic()
@@ -156,10 +205,17 @@ async def media(socket, rtp, playback, call_id=None):
                                           "lastVoiceToRtpMs": None if voice_ms is None else (tick - started) * 1000 - voice_ms}),
                               flush=True)
                         reply = None
+    tasks = [asyncio.create_task(download())]
+    if not playback:
+        tasks.append(asyncio.create_task(upload()))
+    try:
+        completed, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in completed:
+            task.result()
     finally:
-        sender.cancel()
-        with suppress(asyncio.CancelledError):
-            await sender
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def wait_for_answer(events, channel_id, deadline):
@@ -193,6 +249,14 @@ async def run_call(ari, session, origin, headers, control, invite, endpoint, inb
     phone_id, media_id, bridge_id = inbound or prefix + "-phone", prefix + "-media", prefix
     reason = "asterisk_unavailable"
     transport = None
+    rtp = None
+    dial_started = time.monotonic()
+
+    async def trace(stage, **fields):
+        if invite.get("trace") is True and not control.closed:
+            with suppress(aiohttp.ClientError, TimeoutError, ConnectionError):
+                await asyncio.wait_for(control.send_json({"type": "trace", "callId": call_id, "stage": stage, **fields}), 1)
+
     events = asyncio.Queue(128)
     ari.events = events
     try:
@@ -203,9 +267,13 @@ async def run_call(ari, session, origin, headers, control, invite, endpoint, inb
                 return
             await ari.request("POST", "channels/" + phone_id, endpoint=endpoint, app=ari.app,
                               callerId="Notify", timeout=max(1, int(deadline - time.time())))
+            await trace("sip_ringing")
             reason = await wait_for_answer(events, phone_id, deadline)
             if reason:
                 return
+            await trace("sip_answered", durationMs=(time.monotonic() - dial_started) * 1000)
+        else:
+            await trace("sip_ringing")
         reason = "disconnected"
         transport, rtp = await asyncio.get_running_loop().create_datagram_endpoint(
             RtpPeer, local_addr=("127.0.0.1", 0))
@@ -216,12 +284,14 @@ async def run_call(ari, session, origin, headers, control, invite, endpoint, inb
         rtp.remote = ("127.0.0.1", int(local["value"]))
         await ari.request("POST", "bridges/" + bridge_id, type="mixing,proxy_media")
         await ari.request("POST", f"bridges/{bridge_id}/addChannel", channel=f"{phone_id},{media_id}")
+        if inbound is not None:
+            await ari.request("POST", f"channels/{phone_id}/answer")
+            await trace("sip_answered")
+        await trace("rtp_ready")
         async with session.ws_connect(f"{origin}/api/v1/telephony/calls/{call_id}/audio", headers=headers,
                                       params={"inviteId": invite_id}, heartbeat=10) as socket:
-            if inbound is not None:
-                await ari.request("POST", f"channels/{phone_id}/answer")
             tasks = [asyncio.create_task(wait_for_hangup(events, phone_id)),
-                     asyncio.create_task(media(socket, rtp, invite.get("mode") == "playback", call_id if inbound else None))]
+                     asyncio.create_task(media(socket, rtp, invite.get("mode") == "playback", call_id if inbound else None, trace))]
             try:
                 completed, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for task in completed:
@@ -233,10 +303,12 @@ async def run_call(ari, session, origin, headers, control, invite, endpoint, inb
                 await asyncio.gather(*tasks, return_exceptions=True)
     except TimeoutError:
         reason = "missed" if inbound is None and time.time() >= invite["expiresAt"] / 1000 else "asterisk_unavailable"
-    except (aiohttp.ClientError, ValueError, KeyError):
+    except (aiohttp.ClientError, ConnectionError, ValueError, KeyError):
         reason = "asterisk_unavailable"
     finally:
         ari.events = None
+        if rtp is not None:
+            await trace("rtp_frames", sent=rtp.sent, received=rtp.received, dropped=rtp.dropped)
         if transport is not None:
             transport.close()
         await asyncio.gather(

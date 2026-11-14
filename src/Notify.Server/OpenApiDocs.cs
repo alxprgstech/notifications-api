@@ -640,12 +640,18 @@ internal static class OpenApiDocs
             Parameters: new() { ["id"] = "Id звонка." }));
 
         Add("GET", "/api/v1/calls", new("listCalls", "Звонки", "История звонков",
-            "Только владелец (`web`/`device`). Возвращает до 100 последних записей с метаданными: direction, deviceId, reason, durationMs, mode, hasTranscript. Аудио не сохраняется; текст доступен отдельным `GET /calls/{id}/transcript` и удаляется вместе с 30-дневной записью.",
+            "Владелец видит все звонки. Интеграция с `agents:connect` видит звонки своего источника. До 100 активных и завершённых записей. Расшифровки доступны отдельным GET и хранятся 30 дней.",
             ApiAuth.BearerOrWeb, [
                 OkArray<CallRecord>("История звонков.", """[{"id":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","sourceId":"abcdef0123456789abcdef0123456789","agentId":"ffffffffffffffffffffffffffffffff","deviceId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sessionId":"task-1","securityLevel":"standard","startedAt":1767225600000,"endedAt":1767225660000,"status":"ended","reason":"ended","durationMs":60000,"direction":"outgoing"}]"""),
                 Unauthorized,
-                Error(403, "Интеграции недоступно (`owner_required`).", """{"code":"owner_required"}"""),
+                Error(403, "Требуется доступ владельца или `agents:connect`."),
                 RateLimited, InternalError]));
+
+        Add("GET", "/api/v1/calls/{id}/trace", new("getCallTrace", "Звонки", "Этапы звонка",
+            "Возвращает события для текущего или завершённого звонка. Интеграция с `agents:connect` видит только свой источник. Длительности измеряются монотонными часами компонента. Тексты и аудио в события не входят.",
+            ApiAuth.BearerOrWeb, [Ok<CallTrace>("События звонка."), Unauthorized, Error(403, "Доступ запрещён."),
+                Error(404, "Звонок недоступен или события отсутствуют."), RateLimited, InternalError],
+            Parameters: new() { ["id"] = "Id звонка." }));
 
         Add("GET", "/api/v1/calls/incoming", new("getIncomingCall", "Звонки", "Текущий входящий звонок",
             "Только устройство. Возвращает актуальный входящий звонок в состоянии `ringing`; если приглашения нет — 404. `mode` показывает, будет ли это одна фраза (`one_shot`/`playback`) или разговор (`conversation`). Приглашение не включает микрофон: приложение показывает карточку и ждёт явного accept. Этот опрос — резервный путь, если FCM/full-screen intent недоступны.",

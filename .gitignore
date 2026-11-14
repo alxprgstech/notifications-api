@@ -23,3 +23,5 @@ service-account*.json
 
 /deploy/codemode/.wrangler/
 /deploy/codemode/.dev.vars*
+
+/AGENTS.override.md

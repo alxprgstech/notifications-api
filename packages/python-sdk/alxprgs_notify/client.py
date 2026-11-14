@@ -103,6 +103,12 @@ class NotifyClient:
     def call_status(self, call_id: str) -> dict[str, Any]:
         return _result(self.http.get(f"/api/v1/calls/{_id(call_id)}"))
 
+    def call_history(self) -> list[dict[str, Any]]:
+        return _result(self.http.get("/api/v1/calls"))
+
+    def call_trace(self, call_id: str) -> dict[str, Any]:
+        return _result(self.http.get(f"/api/v1/calls/{_id(call_id)}/trace"))
+
     def start_conversation(self, title: str, *, idempotency_key: str, target: str = "android", session_id: str | None = None) -> dict[str, Any]:
         payload = {"title": title, "idempotencyKey": idempotency_key, "target": target, "sessionId": session_id}
         return _result(self.http.post("/api/v1/calls/conversation", json=payload))

@@ -116,8 +116,11 @@ public sealed class SttSpeech(IHttpClientFactory clients, Settings settings)
             if (!response.IsSuccessStatusCode) throw new SpeechException("stt_unavailable");
             var payload = await response.Content.ReadAsStringAsync(deadline.Token);
             using var document = JsonDocument.Parse(payload);
-            var text = document.RootElement.TryGetProperty("text", out var value) ? value.GetString()?.Trim() : null;
-            if (string.IsNullOrEmpty(text) || text.Length > 16000) throw new SpeechException("stt_empty");
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("text", out var value) || value.ValueKind != JsonValueKind.String)
+                throw new SpeechException("stt_unavailable");
+            var text = value.GetString()!.Trim();
+            if (text.Length == 0 || text.Length > 16000) throw new SpeechException("stt_empty");
             return text;
         }
         catch (SpeechException) { throw; }

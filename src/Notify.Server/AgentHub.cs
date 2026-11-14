@@ -169,7 +169,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
                 eventId = Wire.Id(), protocolVersion = Protocol, type = "hello_ack", serverTime = Wire.Now,
                 heartbeatSeconds = settings.AgentHeartbeatSeconds, offlineSeconds = settings.AgentOfflineSeconds,
                 agent = new { agent.Id, agent.Name }, callProtocol = connection.CallProtocol,
-                supportedCallProtocols = CallService.SupportedProtocols, pendingCommands = CountPending(agent.Id)
+                supportedCallProtocols = CallService.SupportedProtocols, pendingCommands = CountPending(agent.Id), callTrace = true
             }, lifetime.Token);
             connection.Ready = true;
             await SendPendingAsync(connection, lifetime.Token);
@@ -250,7 +250,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
                 case "ack":
                     Ack(connection, Text(frame, "commandEventId", 64));
                     break;
-                case "call.dial" or "call.accept" or "call.reject" or "call.end" or "call.interrupt" or "call.say":
+                case "call.dial" or "call.accept" or "call.reject" or "call.end" or "call.interrupt" or "call.say" or "call.trace":
                     if (ControlEvent is { } control) await control(connection.Agent, frame);
                     break;
                 default:

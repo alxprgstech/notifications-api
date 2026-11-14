@@ -16,6 +16,7 @@ agent = ["websockets==17.4"]
 
 [project.scripts]
 notify-mcp = "alxprgs_notify.mcp_stdio:main"
+notifyctl = "alxprgs_notify.notifyctl:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

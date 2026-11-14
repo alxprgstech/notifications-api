@@ -14,42 +14,17 @@ public sealed partial class CallService
     internal static bool IsOrdinarySession(AgentSession[] sessions, string id) =>
         id != PhoneAssistantSession && sessions.Any(session => session.Id == id);
 
-    private const uint PhoneReadyToneFrames = 9;
+    // Fixed system phrases synthesized by Silero (v5.6, baya), 16 kHz mono PCM16LE.
+    private static readonly Lazy<byte[]> PhoneGreeting = new(() => LoadPhonePrompt("phone-greeting"));
+    private static readonly Lazy<byte[]> PhoneSpeechUnavailable = new(() => LoadPhonePrompt("phone-speech-unavailable"));
 
-    private async Task<bool> SendPhoneReadyToneAsync(Call call, MediaSide side)
+    private static byte[] LoadPhonePrompt(string name)
     {
-        const int samplesPerFrame = AudioBytes / 2;
-        const int sampleRate = 16000;
-        const int frequency = 660;
-        const int fadeSamples = 160;
-        try
-        {
-            // SIP media may still be opening on the handset after the bridge attaches.
-            await WaitForAudioAsync(call, call.Cts.Token);
-            for (uint index = 0; index < PhoneReadyToneFrames; index++)
-            {
-                call.Cts.Token.ThrowIfCancellationRequested();
-                var frame = new byte[FrameBytes];
-                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(frame, index);
-                System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(4), index * 20);
-                for (var offset = 0; offset < samplesPerFrame; offset++)
-                {
-                    var sample = (int)index * samplesPerFrame + offset;
-                    var remaining = (int)PhoneReadyToneFrames * samplesPerFrame - 1 - sample;
-                    var gain = Math.Min(fadeSamples, Math.Min(sample, remaining)) / (double)fadeSamples;
-                    var value = (short)(2800 * gain * Math.Sin(2 * Math.PI * frequency * sample / sampleRate));
-                    System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(frame.AsSpan(HeaderBytes + offset * 2), value);
-                }
-                if (!side.Outbound.TryEnqueue(frame))
-                {
-                    await EndAsync(call, "degraded");
-                    return false;
-                }
-                await Task.Delay(20, call.Cts.Token);
-            }
-            return true;
-        }
-        catch (OperationCanceledException) when (call.Cts.IsCancellationRequested) { return false; }
+        using var stream = typeof(CallService).Assembly.GetManifestResourceStream($"Notify.Server.CallAudio.{name}.pcm")
+            ?? throw new InvalidOperationException($"Missing phone prompt {name}.");
+        var pcm = new byte[stream.Length];
+        stream.ReadExactly(pcm);
+        return pcm;
     }
 
     private sealed class SipPeer(string sourceId, WebSocket socket)
@@ -111,7 +86,7 @@ public sealed partial class CallService
             return;
         }
         if (call.Ended) return;
-        if (!await call.Sip.SendAsync(new { type = "invite", callId = call.Id, inviteId = call.InviteId, mode = call.Mode, expiresAt = RingDeadline(call) }))
+        if (!await call.Sip.SendAsync(new { type = "invite", callId = call.Id, inviteId = call.InviteId, mode = call.Mode, expiresAt = RingDeadline(call), trace = true }))
             await EndAsync(call, "asterisk_unavailable");
         else if (call.Ended)
             await call.Sip.SendAsync(new { type = "end", callId = call.Id });
@@ -152,6 +127,14 @@ public sealed partial class CallService
                     var extension = frame.GetProperty("extension").GetString();
                     if (requestId is not { Length: 32 } || !requestId.All(char.IsAsciiHexDigitLower)) break;
                     await HandleSipIncomingAsync(peer, requestId, extension, ct);
+                    continue;
+                }
+                if (type == "trace")
+                {
+                    var callId = frame.GetProperty("callId").GetString();
+                    Call? traced;
+                    lock (sync) traced = callId is null ? null : calls.GetValueOrDefault(callId);
+                    if (traced?.Sip == peer) BridgeTrace(traced, frame);
                     continue;
                 }
                 if (type != "ended") break;
@@ -215,7 +198,7 @@ public sealed partial class CallService
                 call = new Call(Wire.Id(), Wire.Id(), "outgoing", online.Agent.SourceId, online.Agent.Id, online.Agent.Name,
                     null, PhoneAssistantSession, "standard", "Notify Phone Assistant", null,
                     mode: "conversation", target: "asterisk", sip: peer, phoneAssistant: true);
-                calls.Add(call.Id, call);
+                TrackCall(call);
                 phoneAssistantCallId = call.Id;
             }
             _ = RingTimerAsync(call);
@@ -228,7 +211,7 @@ public sealed partial class CallService
                 throw new Fault(409, "agent_offline");
             if (!await call.AgentDecision!.Task.WaitAsync(TimeSpan.FromSeconds(5), ct))
                 throw new Fault(409, "rejected");
-            if (!await peer.SendAsync(new { type = "incoming_ack", requestId, ok = true, callId = call.Id, inviteId = call.InviteId }))
+            if (!await peer.SendAsync(new { type = "incoming_ack", requestId, ok = true, callId = call.Id, inviteId = call.InviteId, trace = true }))
                 await EndAsync(call, "disconnected");
         }
         catch (Exception error) when (error is Fault or TimeoutException or OperationCanceledException)
