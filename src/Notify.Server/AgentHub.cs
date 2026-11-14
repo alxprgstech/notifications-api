@@ -32,11 +32,13 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         public string[] Capabilities { get; set; } = agent.Capabilities;
         public string[] CallProtocols { get; set; } = agent.CallProtocols ?? [];
         public string? CallProtocol { get; set; } = agent.CallProtocol;
+        public bool CallPlaybackStatus { get; set; }
         public volatile bool Ready;
         public long LastSeen { get; set; } = Wire.Now;
     }
 
     public bool IsOnline(string agentId) => FindOnline(agentId) is not null;
+    internal bool WantsPlaybackStatus(string agentId) => FindOnline(agentId)?.CallPlaybackStatus == true;
     public (Agent Agent, string[] Capabilities, AgentSession[] Sessions, string[] CallProtocols, string? CallProtocol)? Online(string agentId) =>
         FindOnline(agentId) is { } connection ? (connection.Agent, connection.Capabilities, connection.Sessions, connection.CallProtocols, connection.CallProtocol) : null;
     private Connection? FindOnline(string agentId) =>
@@ -221,6 +223,8 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         var callProtocols = OptionalStrings(hello, "callProtocols", 8);
         var sessions = Sessions(hello);
         connection.Capabilities = capabilities; connection.Sessions = sessions; connection.CallProtocols = callProtocols;
+        connection.CallPlaybackStatus = hello.TryGetProperty("callPlaybackStatus", out var playbackStatus) &&
+            playbackStatus.ValueKind == JsonValueKind.True;
         connection.CallProtocol = callProtocols.FirstOrDefault(protocol => CallService.SupportedProtocols.Contains(protocol, StringComparer.Ordinal));
         return name;
     }

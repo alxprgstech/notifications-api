@@ -118,7 +118,7 @@ public sealed class CallTests
     private static async Task<WebSocket> ConnectAgentSessions(AppFactory app, string token, Agent agent, string[] sessions, params string[] capabilities)
     {
         var socket = await Ws(app, token).ConnectAsync(new Uri("ws://localhost/api/v1/agents/connect"), CancellationToken.None);
-        await SendText(socket, new { type = "hello", protocolVersion = AgentHub.Protocol, eventId = Wire.Id(), agentId = agent.Id, name = "Call runtime", capabilities = capabilities.Length == 0 ? new[] { "realtime_audio" } : capabilities, callProtocols = new[] { CallService.Protocol }, sessions = sessions.Select(id => new { id, name = id }).ToArray() });
+        await SendText(socket, new { type = "hello", protocolVersion = AgentHub.Protocol, eventId = Wire.Id(), agentId = agent.Id, name = "Call runtime", capabilities = capabilities.Length == 0 ? new[] { "realtime_audio" } : capabilities, callProtocols = new[] { CallService.Protocol }, sessions = sessions.Select(id => new { id, name = id }).ToArray(), callPlaybackStatus = sessions.Contains("notify-phone-assistant") });
         _ = await ReceiveJson(socket);
         return socket;
     }
@@ -608,6 +608,8 @@ public sealed class CallTests
             });
             var route = await agentHttp.GetFromJsonAsync<JsonElement>("/api/v1/telephony/assistant");
             Assert.Equal("7820", route.GetProperty("extension").GetString());
+            Assert.False(route.GetProperty("bridgeOnline").GetBoolean());
+            Assert.False(route.GetProperty("sessionReady").GetBoolean());
             Assert.Equal(HttpStatusCode.Forbidden, (await otherBridge.GetAsync("/api/v1/telephony/assistant")).StatusCode);
             using (var stranger = await Ws(app, Token(otherBridge)).ConnectAsync(
                 new Uri("ws://localhost/api/v1/telephony/connect"), resources.Token))
@@ -623,6 +625,10 @@ public sealed class CallTests
             Assert.Equal("agent_offline", (await ReceiveJson(control)).GetProperty("code").GetString());
             var registered = app.Services.GetRequiredService<AgentHub>().Get(agentId)!;
             using var agent = await ConnectAgentSessions(app, Token(agentHttp), registered, ["selected-chat", phoneSession]);
+            var readiness = await agentHttp.GetFromJsonAsync<JsonElement>("/api/v1/telephony/assistant");
+            Assert.True(readiness.GetProperty("bridgeOnline").GetBoolean());
+            Assert.True(readiness.GetProperty("agentOnline").GetBoolean());
+            Assert.True(readiness.GetProperty("sessionReady").GetBoolean());
             await SendText(control, new { type = "incoming", requestId = Wire.Id(), extension = "7821" });
             Assert.Equal("rejected", (await ReceiveJson(control)).GetProperty("code").GetString());
             using var invalid = await phoneHttp.PostAsJsonAsync("/api/v1/calls", new
@@ -678,6 +684,14 @@ public sealed class CallTests
             }
             Assert.True(hasVoice);
             Assert.Empty(app.Speech.Synthesized);
+            var activeHistory = await agentHttp.GetFromJsonAsync<CallRecord[]>("/api/v1/calls");
+            var activeCall = Assert.Single(activeHistory!, item => item.Id == callId);
+            Assert.Equal("active", activeCall.Status);
+            Assert.True(activeCall.HasTranscript);
+            var greetingStarted = await ReceiveJson(agent);
+            Assert.Equal("call.playback", greetingStarted.GetProperty("type").GetString());
+            Assert.Equal("started", greetingStarted.GetProperty("payload").GetProperty("status").GetString());
+            Assert.Equal("completed", (await ReceiveJson(agent)).GetProperty("payload").GetProperty("status").GetString());
             using var android = await phoneHttp.PostAsJsonAsync("/api/v1/calls", new
             {
                 sourceId = source.Id, sessionId = "selected-chat", mode = "conversation"
@@ -698,10 +712,15 @@ public sealed class CallTests
             {
                 [callId!] = phoneSession, [androidId!] = "selected-chat"
             };
+            JsonElement? speechError = null;
+            JsonElement? playbackNotice = null;
             while (expectedSessions.Count != 0)
             {
                 var frame = await ReceiveJson(agent);
-                if (frame.GetProperty("type").GetString() != "dialog.user") continue;
+                var type = frame.GetProperty("type").GetString();
+                if (type == "call.speech_error") speechError = frame;
+                if (type == "call.playback") playbackNotice = frame;
+                if (type != "dialog.user") continue;
                 var turn = frame.GetProperty("payload");
                 var id = turn.GetProperty("callId").GetString()!;
                 Assert.True(expectedSessions.Remove(id, out var sessionId));
@@ -714,16 +733,25 @@ public sealed class CallTests
                 });
                 await SendText(agent, new
                 {
+                    type = "call.trace", protocolVersion = CallService.Protocol, eventId = Wire.Id(),
+                    payload = new { callId = id, sessionId, turnId, stage = "codex_generation", status = "completed",
+                        durationMs = 120, model = "gpt-6-fixture", agentThreadId = "88888888-8888-8888-8888-888888888888", tokens = 57 }
+                });
+                await SendText(agent, new
+                {
                     type = "call.say", protocolVersion = CallService.Protocol, eventId = Wire.Id(),
                     payload = new { callId = id, sessionId, turnId = turn.GetProperty("turnId").GetString(), text = id == callId ? "Unsupported language" : "Ответ агента" }
                 });
             }
             await Task.WhenAll(ExpectSpeech(audio), ExpectSpeech(androidAudio));
-            var speechError = await ReceiveJson(agent);
-            Assert.Equal("call.speech_error", speechError.GetProperty("type").GetString());
-            Assert.Equal("unsupported_tts_language", speechError.GetProperty("payload").GetProperty("error").GetString());
+            speechError ??= await ReceiveJson(agent);
+            Assert.Equal("call.speech_error", speechError.Value.GetProperty("type").GetString());
+            Assert.Equal("unsupported_tts_language", speechError.Value.GetProperty("payload").GetProperty("error").GetString());
+            playbackNotice ??= await ReceiveJson(agent);
+            Assert.Equal("call.playback", playbackNotice.Value.GetProperty("type").GetString());
             await SendText(control, new { type = "ended", callId, reason = "ended" });
             var ended = await ReceiveJson(agent);
+            while (ended.GetProperty("type").GetString() == "call.playback") ended = await ReceiveJson(agent);
             Assert.Equal("call.ended", ended.GetProperty("type").GetString());
             Assert.Equal(phoneSession, ended.GetProperty("payload").GetProperty("sessionId").GetString());
             var finishedTraceJson = await agentHttp.GetStringAsync($"/api/v1/calls/{callId}/trace");
@@ -735,9 +763,18 @@ public sealed class CallTests
             Assert.Equal(finishedTrace.Events.Select(stage => stage.OffsetMs).Order(), finishedTrace.Events.Select(stage => stage.OffsetMs));
             var processing = Assert.Single(finishedTrace.Events, stage => stage.Stage == "agent_processing");
             Assert.Equal(123d, processing.DurationMs);
+            var codex = Assert.Single(finishedTrace.Events, stage => stage.Stage == "codex_generation");
+            Assert.Equal(processing.TurnId, codex.TurnId);
+            Assert.Equal("gpt-6-fixture", codex.Model);
+            Assert.Equal(57L, codex.Tokens);
+            Assert.Equal("88888888-8888-8888-8888-888888888888", codex.AgentThreadId);
             Assert.Contains(finishedTrace.Events, stage => stage.Stage == "stt" && stage.Status == "completed" && stage.TurnId == processing.TurnId);
             Assert.Contains(finishedTrace.Events, stage => stage.Stage == "rtp_ready" && stage.Source == "asterisk");
             Assert.Contains(finishedTrace.Events, stage => stage.Stage == "tts" && stage.Status == "failed" && stage.TurnId == processing.TurnId);
+            var failedTts = Assert.Single(finishedTrace.Events, stage => stage.Stage == "tts" && stage.Status == "failed");
+            var transcript = Wire.Decode<CallTranscriptResponse>(await agentHttp.GetStringAsync($"/api/v1/calls/{callId}/transcript"));
+            var failedReply = Assert.Single(transcript.Turns, turn => turn.Id == failedTts.ReplyId);
+            Assert.Equal(processing.TurnId, failedReply.ReplyTo);
             await WaitStatus(phoneHttp, androidId!, "active");
             Assert.Equal(HttpStatusCode.NoContent, (await phoneHttp.PostAsync($"/api/v1/calls/{androidId}/end", null)).StatusCode);
             Assert.Equal("selected-chat", (await ReceiveJson(agent)).GetProperty("payload").GetProperty("sessionId").GetString());

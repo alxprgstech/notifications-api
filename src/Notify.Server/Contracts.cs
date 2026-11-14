@@ -52,7 +52,8 @@ public sealed record CallChallengeInput(string SourceId, string? SessionId = nul
 public sealed record CallAcceptInput(string? ChallengeId = null, string? Signature = null);
 public sealed record CallChallenge(string Id, string DeviceId, string Payload, long ExpiresAt);
 public sealed record CallChallengeProof(string Protocol, string ChallengeId, string DeviceId, string Direction, string Action, string SourceId, string AgentId, string? SessionId, string? CallId, string? InviteId, string SecurityLevel, string Nonce, long ExpiresAt);
-public sealed record CallTurn(string Id, string Speaker, string Text, long At, bool Final = true, string? Status = null, string? Error = null);
+public sealed record CallTurn(string Id, string Speaker, string Text, long At, bool Final = true, string? Status = null,
+    string? Error = null, string? ReplyTo = null);
 public sealed record CallTranscript(string CallId, string ProtectedTurns, bool Partial, string? Error, long UpdatedAt);
 public sealed record CallRecord(string Id, string SourceId, string AgentId, string? DeviceId, string? SessionId, string SecurityLevel, long StartedAt, long EndedAt, string Status, string? Reason, int DurationMs, string Direction = "outgoing", bool HasTranscript = false, bool TranscriptPartial = false, string Target = "android");
 public sealed record AgentCommand(string Id, string AgentId, string SourceId, string Type, string Payload, long CreatedAt, long ExpiresAt, string Status = "queued", int Attempts = 0, long? AckedAt = null, string? CorrelationId = null, string? SessionId = null);

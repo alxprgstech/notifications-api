@@ -1,7 +1,7 @@
 
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:net';
 import assert from 'node:assert/strict';
@@ -10,6 +10,7 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const artifact = new URL('../../artifacts/ui/redesign/', import.meta.url);
 const screenshots = new URL('screenshots/', artifact);
 await mkdir(screenshots, { recursive: true });
+const testData = await mkdtemp(fileURLToPath(new URL('data-', artifact)));
 const listener = createServer();
 await new Promise((resolve, reject) => {
   listener.once('error', reject);
@@ -21,7 +22,7 @@ const origin = 'http://127.0.0.1:' + port;
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith('notify__')));
 Object.assign(env, {
   ASPNETCORE_ENVIRONMENT: 'Development', ASPNETCORE_URLS: origin, Notify__PublicUrl: origin,
-  Notify__DataPath: fileURLToPath(new URL('data-' + Date.now() + '/', artifact)),
+  Notify__DataPath: testData,
 });
 const server = spawn('dotnet', [root + 'src/Notify.Server/bin/Release/net10.0/Notify.Server.dll',
   '--webroot', root + 'web/dist'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -178,7 +179,7 @@ try {
     agents: [{ id: 'agent1', sourceId: 'fixture', name: 'Агент разработки', capabilities: ['text_tasks', 'realtime_audio'],
       revoked: false, online: true, lastSeenAt: now, sessions: [{ id: 'task1', name: 'Сборка' }] }],
     calls: [{ id: 'call1', sourceId: 'fixture', agentId: 'agent1', sessionId: 'task1', securityLevel: 'standard',
-      startedAt: now - 60_000, status: 'ended', reason: 'ended', durationMs: 30_000, direction: 'outgoing' },
+      startedAt: now - 60_000, status: 'ended', reason: 'ended', durationMs: 30_000, direction: 'outgoing', hasTranscript: true },
       { id: 'call2', sourceId: 'fixture', agentId: 'agent1', securityLevel: 'elevated',
         startedAt: now - 120_000, status: 'ended', reason: 'missed', durationMs: 0, direction: 'incoming' }],
   };
@@ -195,6 +196,18 @@ try {
     const url = new URL(request.url());
     const path = url.pathname.slice('/api/v1/'.length);
     if (path === 'session' && !signedIn) return route.fulfill({ status: 401, json: { code: 'unauthenticated' } });
+    if (path === 'calls/call1/trace') return route.fulfill({ json: {
+      callId: 'call1', truncated: false, events: [
+        { sequence: 1, stage: 'codex_generation', status: 'completed', source: 'agent',
+          offsetMs: 2050, durationMs: 1328, model: 'gpt-6-fixture', tokens: 57, turnId: 'question-fixture' },
+        { sequence: 2, stage: 'rtp_playback', status: 'interrupted', source: 'asterisk',
+          offsetMs: 2600, durationMs: 420, frames: 22, replyId: 'reply-fixture' },
+      ],
+    } });
+    if (path === 'calls/call2/trace') return route.fulfill({ status: 404, json: { code: 'trace_not_recorded' } });
+    if (path === 'calls/call1/transcript') return route.fulfill({ json: { partial: false,
+      turns: [{ id: 'question-fixture', speaker: 'user', text: 'Проверочная реплика' }],
+    } });
     if (path === 'notifications') {
       if (historyFailure) return route.fulfill({ status: 503, json: { code: 'internal_error' } });
       if (emptyHistory) return route.fulfill({ json: { items: [], next: null } });
@@ -474,6 +487,16 @@ try {
   await page.getByText(/Входящий ·/).waitFor();
   await page.getByText('30 с', { exact: true }).waitFor();
   await page.getByText('С проверкой личности', { exact: true }).waitFor();
+  const callEntries = page.locator('.call-list > li');
+  await callEntries.nth(0).getByText('Таймлайн и этапы').click();
+  await callEntries.nth(0).getByText(/codex_generation/).click();
+  await callEntries.nth(0).getByText('Токены · 57', { exact: true }).waitFor();
+  await callEntries.nth(0).getByText(/rtp_playback · interrupted/).click();
+  await callEntries.nth(0).getByText('Ответ reply-fixture', { exact: true }).waitFor();
+  await callEntries.nth(0).getByText('Расшифровка', { exact: true }).click();
+  await callEntries.nth(0).getByText('Проверочная реплика', { exact: false }).waitFor();
+  await callEntries.nth(1).getByText('Таймлайн и этапы').click();
+  await callEntries.nth(1).getByText('Нет данных об этапах.', { exact: true }).waitFor();
   await shot('calls-dark');
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -509,11 +532,17 @@ try {
   await writeFile(new URL('result.json', artifact), JSON.stringify({
     login: true, returnPage: true, openapi: true, docs: true, guides: true, cabinet: 'synthetic fixtures',
     history: true, management: true, chatgpt: true, theme: true, keyboard: true, mobileNoOverflow: true,
+    callTrace: true, callTranscript: true,
     pageErrors: errors, externalRequests: external,
   }, null, 2));
   console.log('UI checks passed. Screenshots: artifacts/ui/redesign/screenshots');
 } finally {
   if (browser) await browser.close();
-  server.kill();
+  if (server.exitCode === null && server.signalCode === null) {
+    const stopped = new Promise(resolve => server.once('exit', resolve));
+    server.kill();
+    await stopped;
+  }
+  await rm(testData, { recursive: true, force: true });
   await writeFile(new URL('server.log', artifact), log);
 }

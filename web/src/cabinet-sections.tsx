@@ -24,7 +24,8 @@ export type Call = {
   mode?: string; hasTranscript?: boolean; transcriptPartial?: boolean;
 };
 type CallTraceEvent = { sequence: number; stage: string; status: string; source: string; offsetMs: number;
-  turnId?: string; durationMs?: number; code?: string; frames?: number; receivedFrames?: number; droppedFrames?: number; tokens?: number };
+  turnId?: string; durationMs?: number; code?: string; frames?: number; receivedFrames?: number; droppedFrames?: number; tokens?: number;
+  model?: string; agentThreadId?: string; replyId?: string };
 type CallTrace = { events: CallTraceEvent[]; truncated: boolean };
 export type ManagementInput =
   | { action: 'chatgpt.link' }
@@ -58,8 +59,9 @@ const callReasons: Record<string, string> = {
   rejected: 'Отклонён', missed: 'Нет ответа', timeout: 'Время истекло', disconnected: 'Связь прервана',
   unsupported: 'Не поддерживается', busy: 'Занято', invalid_audio: 'Ошибка аудио',
   degraded: 'Проблемы с сетью', revoked: 'Доступ отозван', ended: 'Завершён',
-  playback_sent: 'Фраза воспроизведена', interrupted: 'Прерван', stt_unavailable: 'STT недоступен',
+  playback_sent: 'Аудио отправлено', interrupted: 'Прерван', stt_unavailable: 'STT недоступен',
   stt_timeout: 'STT не успел', stt_empty: 'Речь не распознана',
+  ringing: 'Вызов', connecting: 'Соединение', active: 'Идёт разговор',
 };
 const dateTime = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 const dayFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'full' });
@@ -363,6 +365,9 @@ function CallTraceView({ trace }: { trace: CallTrace }) {
       <details><summary>{event.stage} · {event.status} · +{Math.round(event.offsetMs)} мс</summary>
         <p>{event.source} · {event.durationMs == null ? 'Длительность недоступна' : `${Math.round(event.durationMs)} мс`} {event.code ?? ''}</p>
         {event.turnId && <p>Реплика {event.turnId}</p>}
+        {event.replyId && <p>Ответ {event.replyId}</p>}
+        {event.model && <p>Модель {event.model}</p>}
+        {event.agentThreadId && <p>Чат Codex {event.agentThreadId}</p>}
         {(event.frames != null || event.receivedFrames != null || event.droppedFrames != null) && <p>
           Кадры · отправлено {event.frames ?? '—'} · принято {event.receivedFrames ?? '—'} · отклонено {event.droppedFrames ?? '—'}</p>}
         {event.tokens != null && <p>Токены · {event.tokens}</p>}

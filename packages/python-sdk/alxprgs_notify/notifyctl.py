@@ -51,6 +51,9 @@ def probes(client: NotifyClient, doctor: bool) -> dict[str, Any]:
             result[name] = {"available": response.is_success, "httpStatus": response.status_code}
             if name == "agent" and response.is_success:
                 result[name]["online"] = response.json().get("online")
+            if name == "asteriskRoute" and response.is_success:
+                route = response.json()
+                result[name].update({key: route.get(key) for key in ("extension", "bridgeOnline", "agentOnline", "sessionReady")})
         except httpx.HTTPError:
             result[name] = {"available": False, "httpStatus": None}
     return result
@@ -81,7 +84,12 @@ def print_result(value: Any, machine: bool) -> None:
         for event in value["events"]:
             offset = event["offsetMs"]
             duration = "нет данных" if event.get("durationMs") is None else f'{event["durationMs"]:.0f} мс'
-            print(f'+{offset:.0f} мс  {event["source"]}/{event["stage"]}  {event["status"]}  {duration}  {event.get("code") or ""}')
+            details = [str(event[key]) for key in ("code", "turnId", "replyId", "model", "agentThreadId")
+                       if event.get(key) is not None]
+            for key, label in (("frames", "кадров"), ("tokens", "токенов")):
+                if event.get(key) is not None:
+                    details.append(f"{label} {event[key]}")
+            print(f'+{offset:.0f} мс  {event["source"]}/{event["stage"]}  {event["status"]}  {duration}  {" · ".join(details)}')
         if value.get("truncated"):
             print("Достигнут предел записи событий.")
     else:

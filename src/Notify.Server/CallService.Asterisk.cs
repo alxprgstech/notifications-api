@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace Notify;
 
-public sealed record PhoneAssistantRouteResponse(string Extension);
+public sealed record PhoneAssistantRouteResponse(string Extension, bool BridgeOnline, bool AgentOnline, bool SessionReady);
 
 public sealed partial class CallService
 {
@@ -174,7 +174,12 @@ public sealed partial class CallService
         if (settings.PhoneAssistantExtension.Length == 0 ||
             agents.ForSource(actor.Id)?.Id != settings.PhoneAssistantAgentId)
             throw new Fault(404, "phone_assistant_not_configured");
-        return new(settings.PhoneAssistantExtension);
+        bool bridgeOnline;
+        lock (sync) bridgeOnline = sipPeer?.SourceId == settings.PhoneAssistantBridgeSourceId;
+        var online = agents.Online(settings.PhoneAssistantAgentId);
+        var sessionReady = online is { } live && live.CallProtocol == Protocol &&
+            live.Capabilities.Contains("realtime_audio") && live.Sessions.Any(session => session.Id == PhoneAssistantSession);
+        return new(settings.PhoneAssistantExtension, bridgeOnline, online.HasValue, sessionReady);
     }
 
     private async Task HandleSipIncomingAsync(SipPeer peer, string requestId, string? extension, CancellationToken ct)

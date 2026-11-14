@@ -167,9 +167,25 @@ async def media(socket, rtp, playback, call_id=None, trace=None):
     generation = 0
     reply = None
     playback_turn = None
+    playback_started = None
+    playback_last_sent = None
+    playback_packets = 0
     last_voice = {}
+
+    async def finish_playback(status):
+        nonlocal playback_turn, playback_started, playback_last_sent, playback_packets
+        current = playback_turn
+        began = playback_started
+        last = playback_last_sent
+        count = playback_packets
+        playback_turn = playback_started = playback_last_sent = None
+        playback_packets = 0
+        if trace is not None and current is not None:
+            await trace("rtp_playback", status=status, turnId=current[0], replyId=current[1],
+                        durationMs=None if began is None else (last - began) * 1000, sent=count)
+
     async def download():
-        nonlocal generation, reply, playback_turn
+        nonlocal generation, reply, playback_turn, playback_started, playback_last_sent, playback_packets
         async for message in socket:
             if message.type == aiohttp.WSMsgType.ERROR:
                 raise socket.exception() or ConnectionError("media WebSocket failed")
@@ -177,26 +193,37 @@ async def media(socket, rtp, playback, call_id=None, trace=None):
                 event = message.json()
                 if event.get("type") == "interrupt":
                     generation = max(generation, event["generation"])
-                    if playback_turn is not None and playback_turn[1] < generation:
-                        playback_turn = None
+                    if playback_turn is not None and playback_turn[2] < generation:
+                        await finish_playback("interrupted")
                 elif timing and event.get("type") == "assistant_timing":
                     if len(last_voice) >= 16:
                         last_voice.pop(next(iter(last_voice)))
                     last_voice[event["turnId"]] = event["lastVoiceMediaMs"]
-                elif event.get("status") == "speaking" and event.get("userTurnId"):
-                    playback_turn = event["userTurnId"], event["generation"]
-                    if timing:
-                        reply = playback_turn
+                elif event.get("type") == "conversation" and event.get("status") == "speaking":
+                    next_generation = event["generation"]
+                    if next_generation >= generation:
+                        await finish_playback("interrupted")
+                        playback_turn = event.get("userTurnId"), event["turnId"], next_generation, event.get("expectedFrames")
+                        if timing and playback_turn[0]:
+                            reply = playback_turn[0], next_generation
+                elif (event.get("type") == "conversation" and event.get("status") == "idle"
+                      and playback_turn is not None and event.get("generation") == playback_turn[2]):
+                    await finish_playback("completed" if playback_turn[3] == playback_packets else "cancelled")
             elif message.type == aiohttp.WSMsgType.BINARY and len(message.data) == 652:
                 _, _, frame_generation = FRAME.unpack_from(message.data)
                 if frame_generation >= generation:
                     rtp.send(message.data[12:])
-                    if trace is not None:
-                        if playback_turn is not None and playback_turn[1] == frame_generation:
-                            await trace("rtp_first_out", turnId=playback_turn[0])
-                            playback_turn = None
-                        elif rtp.sent == 1:
-                            await trace("rtp_first_out")
+                    if playback_turn is not None and playback_turn[2] == frame_generation:
+                        playback_packets += 1
+                        playback_last_sent = time.monotonic()
+                        if playback_started is None:
+                            playback_started = playback_last_sent
+                            if trace is not None:
+                                await trace("rtp_first_out", turnId=playback_turn[0], replyId=playback_turn[1])
+                        if playback_packets == playback_turn[3]:
+                            await finish_playback("completed")
+                    elif rtp.sent == 1 and trace is not None:
+                        await trace("rtp_first_out")
                     if reply is not None and reply[1] == frame_generation:
                         turn_id, _ = reply
                         tick = time.monotonic()
@@ -217,6 +244,7 @@ async def media(socket, rtp, playback, call_id=None, trace=None):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await finish_playback("cancelled")
 
 
 async def wait_for_answer(events, channel_id, deadline):
