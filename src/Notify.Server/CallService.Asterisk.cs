@@ -4,9 +4,28 @@ using System.Text.Json;
 
 namespace Notify;
 
+public sealed record PhoneAssistantRouteResponse(string Extension, bool BridgeOnline, bool AgentOnline, bool SessionReady);
+
 public sealed partial class CallService
 {
     internal const string BridgeScope = "telephony:bridge";
+    private const string PhoneAssistantSession = "notify-phone-assistant";
+
+    internal static bool IsOrdinarySession(AgentSession[] sessions, string id) =>
+        id != PhoneAssistantSession && sessions.Any(session => session.Id == id);
+
+    // Fixed system phrases synthesized by Silero (v5.6, baya), 16 kHz mono PCM16LE.
+    private static readonly Lazy<byte[]> PhoneGreeting = new(() => LoadPhonePrompt("phone-greeting"));
+    private static readonly Lazy<byte[]> PhoneSpeechUnavailable = new(() => LoadPhonePrompt("phone-speech-unavailable"));
+
+    private static byte[] LoadPhonePrompt(string name)
+    {
+        using var stream = typeof(CallService).Assembly.GetManifestResourceStream($"Notify.Server.CallAudio.{name}.pcm")
+            ?? throw new InvalidOperationException($"Missing phone prompt {name}.");
+        var pcm = new byte[stream.Length];
+        stream.ReadExactly(pcm);
+        return pcm;
+    }
 
     private sealed class SipPeer(string sourceId, WebSocket socket)
     {
@@ -67,7 +86,7 @@ public sealed partial class CallService
             return;
         }
         if (call.Ended) return;
-        if (!await call.Sip.SendAsync(new { type = "invite", callId = call.Id, inviteId = call.InviteId, mode = call.Mode, expiresAt = RingDeadline(call) }))
+        if (!await call.Sip.SendAsync(new { type = "invite", callId = call.Id, inviteId = call.InviteId, mode = call.Mode, expiresAt = RingDeadline(call), trace = true }))
             await EndAsync(call, "asterisk_unavailable");
         else if (call.Ended)
             await call.Sip.SendAsync(new { type = "end", callId = call.Id });
@@ -102,6 +121,22 @@ public sealed partial class CallService
                     if (!await peer.SendAsync(new { type = "heartbeat_ack" })) break;
                     continue;
                 }
+                if (type == "incoming")
+                {
+                    var requestId = frame.GetProperty("requestId").GetString();
+                    var extension = frame.GetProperty("extension").GetString();
+                    if (requestId is not { Length: 32 } || !requestId.All(char.IsAsciiHexDigitLower)) break;
+                    await HandleSipIncomingAsync(peer, requestId, extension, ct);
+                    continue;
+                }
+                if (type == "trace")
+                {
+                    var callId = frame.GetProperty("callId").GetString();
+                    Call? traced;
+                    lock (sync) traced = callId is null ? null : calls.GetValueOrDefault(callId);
+                    if (traced?.Sip == peer) BridgeTrace(traced, frame);
+                    continue;
+                }
                 if (type != "ended") break;
                 var id = frame.GetProperty("callId").GetString();
                 var reason = frame.GetProperty("reason").GetString();
@@ -114,18 +149,86 @@ public sealed partial class CallService
         catch (Exception error) when (error is WebSocketException or OperationCanceledException or JsonException or InvalidOperationException or KeyNotFoundException) { }
         finally
         {
-            Call? active;
+            Call[] affected;
             lock (sync)
             {
                 if (sipPeer == peer) sipPeer = null;
-                active = currentId == null ? null : calls.GetValueOrDefault(currentId);
+                affected = calls.Values.Where(call => call.Sip == peer && !call.Ended).ToArray();
             }
-            if (active?.Sip == peer) await EndAsync(active, "disconnected");
+            await Task.WhenAll(affected.Select(call => EndAsync(call, "disconnected")));
+            if (socket.State == WebSocketState.CloseReceived)
+            {
+                using var closing = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                try { await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", closing.Token); }
+                catch (Exception error) when (error is WebSocketException or OperationCanceledException) { }
+            }
         }
     }
 
     private static bool GetBridgeScope(Microsoft.Data.Sqlite.SqliteConnection c, Microsoft.Data.Sqlite.SqliteTransaction t, string sourceId) =>
         Database.Get<Source>(c, t, "source", sourceId) is { Revoked: false } source && source.Scopes.Contains(BridgeScope);
+
+    internal PhoneAssistantRouteResponse PhoneAssistantRoute(Actor actor)
+    {
+        actor.RequireScope("agents:connect");
+        if (settings.PhoneAssistantExtension.Length == 0 ||
+            agents.ForSource(actor.Id)?.Id != settings.PhoneAssistantAgentId)
+            throw new Fault(404, "phone_assistant_not_configured");
+        bool bridgeOnline;
+        lock (sync) bridgeOnline = sipPeer?.SourceId == settings.PhoneAssistantBridgeSourceId;
+        var online = agents.Online(settings.PhoneAssistantAgentId);
+        var sessionReady = online is { } live && live.CallProtocol == Protocol &&
+            live.Capabilities.Contains("realtime_audio") && live.Sessions.Any(session => session.Id == PhoneAssistantSession);
+        return new(settings.PhoneAssistantExtension, bridgeOnline, online.HasValue, sessionReady);
+    }
+
+    private async Task HandleSipIncomingAsync(SipPeer peer, string requestId, string? extension, CancellationToken ct)
+    {
+        Call? call = null;
+        try
+        {
+            if (settings.PhoneAssistantExtension.Length == 0 || extension != settings.PhoneAssistantExtension ||
+                peer.SourceId != settings.PhoneAssistantBridgeSourceId)
+                throw new Fault(403, "rejected");
+            if (!stt.Enabled) throw new Fault(503, "stt_unavailable");
+            lock (sync)
+            {
+                if (peer != sipPeer || phoneAssistantCallId != null ||
+                    (currentId is { } id && calls[id].Sip != null)) throw new Fault(409, "busy");
+                if (agents.Online(settings.PhoneAssistantAgentId) is not { } online ||
+                    online.CallProtocol != Protocol || !online.Capabilities.Contains("realtime_audio") ||
+                    !online.Sessions.Any(session => session.Id == PhoneAssistantSession) ||
+                    online.Agent.SourceId == peer.SourceId)
+                    throw new Fault(409, "agent_offline");
+                call = new Call(Wire.Id(), Wire.Id(), "outgoing", online.Agent.SourceId, online.Agent.Id, online.Agent.Name,
+                    null, PhoneAssistantSession, "standard", "Notify Phone Assistant", null,
+                    mode: "conversation", target: "asterisk", sip: peer, phoneAssistant: true);
+                TrackCall(call);
+                phoneAssistantCallId = call.Id;
+            }
+            _ = RingTimerAsync(call);
+            if (!await agents.SendControlAsync(call.AgentId, "call.invite", new
+            {
+                callId = call.Id, inviteId = call.InviteId, direction = call.Direction, sourceId = call.SourceId,
+                sessionId = call.SessionId, securityLevel = call.SecurityLevel, mode = call.Mode,
+                target = call.Target, extension, phoneAssistant = true, expiresAt = RingDeadline(call)
+            }, ct))
+                throw new Fault(409, "agent_offline");
+            if (!await call.AgentDecision!.Task.WaitAsync(TimeSpan.FromSeconds(5), ct))
+                throw new Fault(409, "rejected");
+            if (!await peer.SendAsync(new { type = "incoming_ack", requestId, ok = true, callId = call.Id, inviteId = call.InviteId, trace = true }))
+                await EndAsync(call, "disconnected");
+        }
+        catch (Exception error) when (error is Fault or TimeoutException or OperationCanceledException)
+        {
+            var code = error is Fault fault ? fault.Code : "asterisk_unavailable";
+            log.LogInformation("Phone assistant SIP request {RequestId} rejected: {Code}, call={CallId}",
+                requestId, code, call?.Id);
+            if (call != null) await EndAsync(call, code);
+            if (!ct.IsCancellationRequested)
+                await peer.SendAsync(new { type = "incoming_ack", requestId, ok = false, code });
+        }
+    }
 
     internal async Task AttachBridgeAsync(Actor actor, string id, string inviteId, Func<Task<WebSocket>> acceptSocket, CancellationToken ct)
     {
@@ -136,10 +239,12 @@ public sealed partial class CallService
             call = calls.GetValueOrDefault(id) ?? throw new Fault(404, "call_not_found");
             if (call.Sip == null || call.Sip != sipPeer || call.Sip.SourceId != actor.Id || call.InviteId != inviteId)
                 throw new Fault(404, "call_not_found");
-            if (call.Status != "ringing" || Wire.Now >= RingDeadline(call)) throw new Fault(409, "call_not_ready");
-            call.Status = "connecting";
+            if (call.PhoneAssistant ? call.Status != "connecting" || call.SipMediaClaimed
+                : call.Status != "ringing" || Wire.Now >= RingDeadline(call)) throw new Fault(409, "call_not_ready");
+            call.SipMediaClaimed = true;
+            if (!call.PhoneAssistant) call.Status = "connecting";
         }
-        _ = MediaTimerAsync(call);
+        if (!call.PhoneAssistant) _ = MediaTimerAsync(call);
         try
         {
             using var socket = await acceptSocket();

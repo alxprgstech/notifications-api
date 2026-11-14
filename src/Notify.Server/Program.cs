@@ -193,6 +193,7 @@ api.MapPost("/calls/conversation", (CallConversationInput input, HttpContext c, 
     ChatGptCall.RestAsync(() => calls.StartConversation(Auth.Actor(c), input.Title, input.IdempotencyKey, ct, input.Target, input.SessionId)));
 api.MapPost("/calls/{id}/say", (string id, CallSpeakInput input, HttpContext c, ChatGptCall calls) =>
     ChatGptCall.RestAsync(() => Task.FromResult(calls.Speak(Auth.Actor(c), id, input.Text, input.IdempotencyKey))));
+api.MapGet("/telephony/assistant", (HttpContext c, CallService calls) => calls.PhoneAssistantRoute(Auth.Actor(c)));
 api.Map("/telephony/connect", async (HttpContext c, CallService calls, CancellationToken ct) =>
 {
     var actor = Auth.Actor(c);
@@ -213,6 +214,7 @@ api.MapGet("/calls", (HttpContext c, CallService calls) => calls.History(Auth.Ac
 api.MapGet("/calls/incoming", (HttpContext c, CallService calls) => calls.Incoming(Auth.Actor(c)));
 api.MapGet("/calls/{id}", (string id, HttpContext c, CallService calls) => calls.State(Auth.Actor(c), id));
 api.MapGet("/calls/{id}/transcript", (string id, HttpContext c, CallService calls) => calls.Transcript(Auth.Actor(c), id));
+api.MapGet("/calls/{id}/trace", (string id, HttpContext c, CallService calls) => calls.TraceFor(Auth.Actor(c), id));
 api.MapPost("/calls/{id}/challenge", (string id, HttpContext c, CallService calls) => calls.ChallengeIncoming(Auth.Actor(c), id));
 api.MapPost("/calls/{id}/accept", async (string id, CallAcceptInput input, HttpContext c, CallService calls) => await calls.AcceptAsync(Auth.Actor(c), id, input));
 api.MapPost("/calls/{id}/reject", async (string id, HttpContext c, CallService calls) => { await calls.RejectAsync(Auth.Actor(c), id); return Results.NoContent(); });
@@ -238,6 +240,13 @@ api.MapGet("/notifications/{id}/deliveries", (string id, HttpContext c, Notifica
 api.MapGet("/sync", (long? after, HttpContext c, NotificationService service) => service.Sync(Auth.Actor(c), after ?? 0));
 api.MapGet("/devices", (HttpContext c, NotificationService service) => service.Devices(Auth.Actor(c)));
 api.MapGet("/agents", (HttpContext c, AgentHub hub) => hub.List(Auth.Actor(c)));
+api.MapGet("/agents/self", (HttpContext c, AgentHub hub) =>
+{
+    var actor = Auth.Actor(c);
+    if (actor.Kind != "integration" || !actor.Scopes.Contains("agents:connect")) throw new Fault(403, "agents_scope_required");
+    c.Response.Headers.CacheControl = "no-store";
+    return hub.DescribeSource(actor.Id);
+});
 api.Map("/agents/connect", async (HttpContext c, AgentHub hub, CancellationToken ct) =>
 {
     var actor = Auth.Actor(c);

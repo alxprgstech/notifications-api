@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -23,6 +24,7 @@ public sealed partial class CallService
     private readonly object sync = new();
     private readonly Dictionary<string, Call> calls = new();
     private string? currentId;
+    private string? phoneAssistantCallId;
     private SipPeer? sipPeer;
 
     public CallService(AgentHub agents, Database db, Settings settings, ILogger<CallService> log, IPushSender push,
@@ -34,7 +36,7 @@ public sealed partial class CallService
         agents.ControlEvent += HandleAgentFrame; agents.DisconnectedEvent += HandleAgentDisconnected;
     }
 
-    private sealed class Call(string id, string inviteId, string direction, string sourceId, string agentId, string agentName, string? deviceId, string? sessionId, string securityLevel, string title, string? iconId, ReadOnlyMemory<byte> playback = default, string mode = "one_shot", string target = "android", SipPeer? sip = null)
+    private sealed class Call(string id, string inviteId, string direction, string sourceId, string agentId, string agentName, string? deviceId, string? sessionId, string securityLevel, string title, string? iconId, ReadOnlyMemory<byte> playback = default, string mode = "one_shot", string target = "android", SipPeer? sip = null, bool phoneAssistant = false)
     {
         public string Id { get; } = id;
         public string InviteId { get; } = inviteId;
@@ -52,25 +54,35 @@ public sealed partial class CallService
         public string Mode { get; } = mode;
         public string Target { get; } = target;
         public SipPeer? Sip { get; } = sip;
+        public bool PhoneAssistant { get; } = phoneAssistant;
+        public TaskCompletionSource<bool>? AgentDecision { get; } =
+            phoneAssistant ? new(TaskCreationOptions.RunContinuationsAsynchronously) : null;
+        public bool SipMediaClaimed;
         public long AudioReadyAt;
         public TaskCompletionSource? PlaybackSent { get; } = playback.IsEmpty ? null : new(TaskCreationOptions.RunContinuationsAsynchronously);
         public long StartedAt { get; } = Wire.Now; public long? ActiveAt, EndedAt; public string Status = "ringing"; public string? Reason;
         public int PlaybackGeneration;
         public bool Ended; public CancellationTokenSource Cts { get; } = new(); public MediaSide? Phone, AgentMedia;
         public ConversationState? Conversation;
+        public readonly long TraceStarted = Stopwatch.GetTimestamp();
+        public readonly object TraceGate = new();
+        public readonly List<CallTraceEvent> TraceEvents = [];
+        public bool TraceTruncated, TraceClosed;
     }
 
-    internal void EnsureIdle()
+    internal void EnsureIdle(string target)
     {
-        lock (sync) { if (currentId != null) throw new Fault(409, "busy"); }
+        lock (sync) { if (IsBusy(target)) throw new Fault(409, "busy"); }
     }
+
+    private bool IsBusy(string? target) => currentId != null || (target == "asterisk" && phoneAssistantCallId != null);
 
     internal object StartPlayback(Actor actor, string title, string text, ReadOnlyMemory<byte> pcm, string attemptId, string fingerprint, string? agentId = null, string? agentName = null, string target = "android")
     {
         Call call;
         lock (sync)
         {
-            if (currentId != null) throw new Fault(409, "busy");
+            if (IsBusy(target)) throw new Fault(409, "busy");
             var sip = ResolveTarget(target);
             call = db.Run((c, t) =>
             {
@@ -86,7 +98,7 @@ public sealed partial class CallService
                 Put(c, t, ChatGptCall.AttemptKind, attemptId, new ChatGptCallAttempt(fingerprint, created.Id, created.StartedAt));
                 return created;
             });
-            calls[call.Id] = call;
+            TrackCall(call, recorded: true);
             currentId = call.Id;
         }
         RecordTurn(call, "agent", text, final: true, status: "complete");
@@ -105,6 +117,8 @@ public sealed partial class CallService
         public TaskCompletionSource PeerClosed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Closed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public long LastSeq = -1, LastTimestamp = -1;
+        public long ReceivedFrames, SentFrames, DroppedFrames;
+        public PlaybackReceipt? PendingPlayback;
         public async Task<bool> TextAsync(string json, CancellationToken ct = default)
         {
             if (!await SendLock.WaitAsync(TimeSpan.FromSeconds(2))) return false;
@@ -125,12 +139,17 @@ public sealed partial class CallService
         }
     }
 
+    private sealed record PlaybackReceipt(uint Sequence, uint Generation)
+    {
+        public TaskCompletionSource Sent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
     /// <summary>Per-call, in-memory conversation state. No utterance is written to disk.</summary>
     private sealed class ConversationState
     {
-        public Channel<byte[]> Utterances { get; } = Channel.CreateBounded<byte[]>(new BoundedChannelOptions(4)
+        public Channel<Utterance> Utterances { get; } = Channel.CreateBounded<Utterance>(new BoundedChannelOptions(4)
         {
-            SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.DropWrite,
+            SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait,
         });
         public readonly object Gate = new();
         public readonly List<byte> Pending = new();
@@ -139,12 +158,19 @@ public sealed partial class CallService
         public int SilentFrames;
         public double Noise = 180;
         public string? LastUserTurnId;
+        public long LastVoiceTick;
+        public long LastVoiceMediaMs;
+        public string? SpeechId;
+        public long SpeechStarted;
+        public int UserGeneration;
         public readonly HashSet<string> Answered = new(StringComparer.Ordinal);
+        public readonly HashSet<string> Delivered = new(StringComparer.Ordinal);
         public CancellationTokenSource? Playback;
-        public Task? Loop;
         public uint PhoneSequence;
         public bool Ended;
     }
+
+    private sealed record Utterance(byte[] Pcm, string Id, long LastVoiceTick, long ReadyTick, long LastVoiceMediaMs, int UserGeneration);
 
     internal (Agent Agent, string[] Capabilities, AgentSession[] Sessions, string[] CallProtocols, string? CallProtocol)? AgentOnline(string agentId) => agents.Online(agentId);
 
@@ -160,7 +186,7 @@ public sealed partial class CallService
                 if (existing.Fingerprint != fingerprint) throw new Fault(409, "idempotency_conflict");
                 return State(actor, existing.CallId);
             }
-            if (currentId != null) throw new Fault(409, "busy");
+            if (IsBusy(target)) throw new Fault(409, "busy");
             var sip = ResolveTarget(target);
             call = db.Run((c, t) =>
             {
@@ -174,7 +200,7 @@ public sealed partial class CallService
                 Put(c, t, ChatGptCall.ConversationAttemptKind, attemptId, new ChatGptCallAttempt(fingerprint, created.Id, created.StartedAt));
                 return created;
             });
-            calls[call.Id] = call;
+            TrackCall(call, recorded: true);
             currentId = call.Id;
         }
         _ = RingTimerAsync(call);
@@ -201,7 +227,7 @@ public sealed partial class CallService
         var online = agents.Online(agent.Id) ?? throw new Fault(409, "agent_offline");
         if (!online.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) throw new Fault(409, "agent_unsupported");
         if (online.CallProtocol != Protocol) throw new Fault(409, "call_protocol_unsupported");
-        if (input.SessionId != null && online.Sessions.All(s => s.Id != input.SessionId)) throw new Fault(400, "invalid_session");
+        if (input.SessionId != null && !IsOrdinarySession(online.Sessions, input.SessionId)) throw new Fault(400, "invalid_session");
         return CreateChallenge(actor, "outgoing", "start", input.SourceId, agent.Id, input.SessionId, null, null, "elevated");
     }
     public object ChallengeIncoming(Actor actor, string callId)
@@ -236,7 +262,7 @@ public sealed partial class CallService
         var online = agents.Online(agent.Id) ?? throw new Fault(409, "agent_offline");
         if (!online.Capabilities.Contains("realtime_audio", StringComparer.Ordinal)) throw new Fault(409, "agent_unsupported");
         if (online.CallProtocol != Protocol) throw new Fault(409, "call_protocol_unsupported");
-        if (input.SessionId != null && online.Sessions.All(s => s.Id != input.SessionId)) throw new Fault(400, "invalid_session");
+        if (input.SessionId != null && !IsOrdinarySession(online.Sessions, input.SessionId)) throw new Fault(400, "invalid_session");
         lock (sync) { if (currentId != null) throw new Fault(409, "busy"); }
         if (input.SecurityLevel == "elevated") VerifyChallenge(actor, input.ChallengeId, input.Signature, "outgoing", "start", input.SourceId, agent.Id, input.SessionId, null, null, "elevated");
         else if (input.ChallengeId != null || input.Signature != null) throw new Fault(400, "invalid_call");
@@ -246,7 +272,7 @@ public sealed partial class CallService
         {
             if (currentId != null) throw new Fault(409, "busy");
             call = new Call(Wire.Id(), Wire.Id(), "outgoing", input.SourceId, agent.Id, online.Agent.Name, actor.Id, input.SessionId, input.SecurityLevel, "Звонок", iconId, mode: input.Mode);
-            calls[call.Id] = call; currentId = call.Id;
+            TrackCall(call); currentId = call.Id;
         }
         _ = RingTimerAsync(call);
         var invited = await agents.SendControlAsync(call.AgentId, "call.invite", new
@@ -312,7 +338,7 @@ public sealed partial class CallService
         {
             await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "stt_unavailable" }); return;
         }
-        if (sessionId != null && online.Value.Sessions.All(s => s.Id != sessionId))
+        if (sessionId != null && !IsOrdinarySession(online.Value.Sessions, sessionId))
         {
             await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = "invalid_session" }); return;
         }
@@ -335,10 +361,10 @@ public sealed partial class CallService
         lock (sync)
         {
             if (target == "asterisk" && sipPeer == null) failure = "asterisk_unavailable";
-            else if (currentId == null)
+            else if (!IsBusy(target))
             {
                 call = new Call(Wire.Id(), Wire.Id(), "incoming", agent.SourceId, agent.Id, online.Value.Agent.Name, null, sessionId, security, string.IsNullOrWhiteSpace(title) ? online.Value.Agent.Name : title, iconId, mode: mode, target: target!, sip: target == "asterisk" ? sipPeer : null);
-                calls[call.Id] = call; currentId = call.Id;
+                TrackCall(call); currentId = call.Id;
             }
         }
         if (call == null) { await agents.SendControlAsync(agent.Id, "call.dial_ack", new { requestEventId, ok = false, code = failure }); return; }
@@ -366,13 +392,43 @@ public sealed partial class CallService
     }
     public List<CallRecord> History(Actor actor)
     {
-        actor.RequireOwner();
-        return db.Run((c, t) => All<CallRecord>(c, t, "call").OrderByDescending(c => c.StartedAt).Take(100).ToList());
+        RequireHistoryAccess(actor);
+        CallRecord[] active;
+        lock (sync) active = calls.Values.Where(call => !call.Ended).Select(call => HistoryRow(call, call.Status, call.Reason)).ToArray();
+        var records = db.Run((c, t) => Rows(c, t, """
+            SELECT item.data FROM objects AS item
+            WHERE item.kind='call' AND ($source IS NULL OR json_extract(item.data,'$.sourceId')=$source)
+            ORDER BY CAST(json_extract(item.data,'$.startedAt') AS INTEGER) DESC, item.id DESC
+            LIMIT 100
+            """, ("$source", actor.IsOwner ? null : actor.Id)).Select(Wire.Decode<CallRecord>).ToList());
+        var visible = active.Where(call => actor.IsOwner || call.SourceId == actor.Id);
+        var activeWithTranscripts = db.Run((c, t) => visible.Select(call =>
+        {
+            var transcript = Get<CallTranscript>(c, t, "calltranscript", call.Id);
+            return call with { HasTranscript = transcript is not null, TranscriptPartial = transcript?.Partial == true };
+        }).ToArray());
+        return activeWithTranscripts.Concat(records)
+            .DistinctBy(call => call.Id).OrderByDescending(call => call.StartedAt).Take(100).ToList();
     }
 
-    private string RecordTurn(Call call, string speaker, string text, bool final = true, string? status = null, string? error = null)
+    private static CallRecord HistoryRow(Call call, string status, string? reason) => new(call.Id, call.SourceId,
+        call.AgentId, call.DeviceId, call.SessionId, call.SecurityLevel, call.StartedAt, call.EndedAt ?? call.StartedAt,
+        status, reason, call.ActiveAt is { } active ? (int)Math.Clamp((call.EndedAt ?? Wire.Now) - active, 0, int.MaxValue) : 0,
+        call.Direction, Target: call.Target);
+
+    private void TrackCall(Call call, bool recorded = false)
     {
-        var turnId = Wire.Id();
+        if (!recorded)
+            db.Run((c, t) => { Put(c, t, "call", call.Id, HistoryRow(call, "ended", "interrupted")); return 0; });
+        calls.Add(call.Id, call);
+        Trace(call, "call_created");
+        SaveTrace(call);
+    }
+
+    private string RecordTurn(Call call, string speaker, string text, bool final = true, string? status = null,
+        string? error = null, string? id = null, string? replyTo = null)
+    {
+        var turnId = id ?? Wire.Id();
         try
         {
             var safe = text.Length > 16000 ? text[..16000] : text;
@@ -380,7 +436,7 @@ public sealed partial class CallService
             {
                 var existing = Get<CallTranscript>(c, t, "calltranscript", call.Id);
                 var turns = existing == null ? new List<CallTurn>() : Wire.Decode<List<CallTurn>>(transcriptProtector.Unprotect(existing.ProtectedTurns));
-                turns.Add(new CallTurn(turnId, speaker, safe, Wire.Now, final, status, error));
+                turns.Add(new CallTurn(turnId, speaker, safe, Wire.Now, final, status, error, replyTo));
                 Put(c, t, "calltranscript", call.Id, new CallTranscript(call.Id,
                     transcriptProtector.Protect(Wire.Encode(turns)),
                     existing?.Partial == true || error != null, error ?? existing?.Error, Wire.Now));
@@ -424,8 +480,9 @@ public sealed partial class CallService
     {
         try
         {
-            Call? call; lock (sync) call = calls.Values.FirstOrDefault(c => c.SourceId == sourceId && !c.Ended);
-            if (call != null) await EndAsync(call, "revoked");
+            Call[] affected;
+            lock (sync) affected = calls.Values.Where(c => (c.SourceId == sourceId || c.Sip?.SourceId == sourceId) && !c.Ended).ToArray();
+            await Task.WhenAll(affected.Select(call => EndAsync(call, "revoked")));
         }
         catch (Exception e) { log.LogWarning("Source revoke call cleanup failed: {Type}", e.GetType().Name); }
     }
@@ -481,13 +538,17 @@ public sealed partial class CallService
             {
                 call.Status = "active"; call.ActiveAt = Wire.Now;
                 call.AudioReadyAt = Environment.TickCount64 + settings.CallAudioStartDelayMs;
+                if (call.Mode == "conversation") call.Conversation = new ConversationState();
             }
         }
         _ = SendLoopAsync(call, side);
-        _ = ReceiveLoopAsync(call, side, phone);
+        if (call.Mode != "conversation") _ = ReceiveLoopAsync(call, side, phone);
         log.LogInformation("Call {CallId} media attached: {Side} status={Status}", call.Id, phone ? "phone" : "agent", call.Status);
+        Trace(call, phone ? "phone_media" : "agent_media");
         if (both)
         {
+            Trace(call, "call_active", started: call.TraceStarted);
+            SaveTrace(call);
             _ = MaxTimerAsync(call);
             if (call.Mode == "one_shot")
             {
@@ -502,7 +563,10 @@ public sealed partial class CallService
             {
                 if (notified)
                 {
-                    StartConversation(call);
+                    var conversation = call.Conversation!;
+                    _ = ReceiveLoopAsync(call, side, phone);
+                    _ = ConversationLoopAsync(call, conversation);
+                    if (call.PhoneAssistant) _ = SayAsync(call, "Привет, я на связи.", null, greeting: true);
                     if (call.UsesAgent)
                         await agents.SendControlAsync(call.AgentId, "call.active", new { callId = call.Id, inviteId = call.InviteId, mode = call.Mode });
                 }
@@ -566,12 +630,17 @@ public sealed partial class CallService
                     return;
                 }
                 if (side.Cts.IsCancellationRequested) continue;
-                if (result.MessageType != WebSocketMessageType.Binary || !result.EndOfMessage || !ValidFrame(buffer, result.Count, side, out var generation)) { await EndAsync(call, "invalid_audio"); return; }
+                if (result.MessageType != WebSocketMessageType.Binary || !result.EndOfMessage || !ValidFrame(buffer, result.Count, side, out var generation))
+                {
+                    Interlocked.Increment(ref side.DroppedFrames);
+                    await EndAsync(call, "invalid_audio"); return;
+                }
+                Interlocked.Increment(ref side.ReceivedFrames);
                 bool active; lock (sync) active = call.Status == "active" && !call.Ended;
                 if (!active || (call.Mode == "one_shot" && Environment.TickCount64 < call.AudioReadyAt)) continue;
                 if (phone && call.Mode == "conversation")
                 {
-                    AcceptConversationFrame(call, buffer.AsMemory(HeaderBytes, AudioBytes));
+                    AcceptConversationFrame(call, buffer.AsMemory(HeaderBytes, AudioBytes), side.LastTimestamp);
                     continue;
                 }
                 if (phone && !call.Playback.IsEmpty) continue;
@@ -597,10 +666,19 @@ public sealed partial class CallService
                 await side.SendLock.WaitAsync(side.Cts.Token);
                 try
                 {
-                    if (side.Name == "phone" && TryGeneration(frame, out var generation) && generation < (uint)call.PlaybackGeneration) continue;
+                    if (side.Name == "phone" && TryGeneration(frame, out var generation) && generation < (uint)call.PlaybackGeneration)
+                    {
+                        Interlocked.Increment(ref side.DroppedFrames);
+                        continue;
+                    }
                     if (side.Socket.State == WebSocketState.Open)
                     {
                         await side.Socket.SendAsync(new ArraySegment<byte>(frame), WebSocketMessageType.Binary, true, side.Cts.Token);
+                        Interlocked.Increment(ref side.SentFrames);
+                        if (Volatile.Read(ref side.PendingPlayback) is { } receipt &&
+                            receipt.Sequence == BinaryPrimitives.ReadUInt32BigEndian(frame) &&
+                            receipt.Generation == BinaryPrimitives.ReadUInt32BigEndian(frame.AsSpan(8)))
+                            receipt.Sent.TrySetResult();
                         if (call.PlaybackSent != null && BinaryPrimitives.ReadUInt32BigEndian(frame) == (call.Playback.Length - 1) / AudioBytes)
                             call.PlaybackSent.TrySetResult();
                     }
@@ -634,11 +712,14 @@ public sealed partial class CallService
             if (callId == null) return;
             Call? call; lock (sync) calls.TryGetValue(callId, out call);
             if (call == null || !call.Playback.IsEmpty || call.AgentId != agent.Id) return;
+            if (payload.TryGetProperty("sessionId", out var session) &&
+                (session.ValueKind is not (JsonValueKind.String or JsonValueKind.Null) || session.GetString() != call.SessionId)) return;
             switch (type)
             {
                 case "call.accept": await AcceptByAgentAsync(call); break;
                 case "call.reject": await EndAsync(call, "rejected"); break;
                 case "call.end": await EndAsync(call, "ended"); break;
+                case "call.trace": AgentTrace(call, payload); break;
                 case "call.interrupt":
                     if (!payload.TryGetProperty("generation", out var generation) || !generation.TryGetInt32(out var number) || number < 0) return;
                     await InterruptAsync(call, number);
@@ -661,31 +742,38 @@ public sealed partial class CallService
             call.Status = "connecting";
         }
         _ = MediaTimerAsync(call);
+        Trace(call, "agent_accepted");
+        call.AgentDecision?.TrySetResult(true);
         await Task.CompletedTask;
     }
     private async Task InterruptAsync(Call call, int generation)
     {
         MediaSide? phone;
+        ConversationState? conversation;
         lock (sync)
         {
             if (call.Ended || call.Status != "active" || generation <= call.PlaybackGeneration) return;
-            call.PlaybackGeneration = generation; phone = call.Phone;
+            phone = call.Phone;
+            conversation = call.Conversation;
+            if (conversation is null) call.PlaybackGeneration = generation;
         }
-        call.Conversation?.Playback?.Cancel();
         if (phone == null) return;
-        phone.Outbound.Clear();
+        if (conversation is null) phone.Outbound.Clear();
+        else
+        {
+            lock (conversation.Gate)
+            {
+                if (conversation.Ended || generation <= call.PlaybackGeneration) return;
+                call.PlaybackGeneration = generation;
+                conversation.Playback?.Cancel();
+                phone.Outbound.Clear();
+            }
+        }
         await phone.TextAsync(Wire.Encode(new { type = "interrupt", generation }));
     }
 
     private const int ConversationMaxPcm = 60 * 32000;
-
-    private void StartConversation(Call call)
-    {
-        if (call.Conversation != null) return;
-        var conversation = new ConversationState();
-        lock (sync) call.Conversation = conversation;
-        conversation.Loop = ConversationLoopAsync(call, conversation);
-    }
+    private const int PhoneAssistantTailFrames = 6;
 
     private static double Rms(ReadOnlySpan<byte> pcm)
     {
@@ -698,8 +786,8 @@ public sealed partial class CallService
         return pcm.Length < 2 ? 0 : Math.Sqrt(sum / (pcm.Length / 2));
     }
 
-    /// <summary>Energy VAD with 200 ms pre-roll, 700 ms endpoint, and a hard 15 s utterance cap.</summary>
-    private void AcceptConversationFrame(Call call, ReadOnlyMemory<byte> pcm)
+    /// <summary>Energy VAD with 200 ms pre-roll and configurable silence and utterance limits.</summary>
+    private void AcceptConversationFrame(Call call, ReadOnlyMemory<byte> pcm, long mediaMs)
     {
         var state = call.Conversation;
         if (state == null || state.Ended) return;
@@ -713,6 +801,9 @@ public sealed partial class CallService
             if (voice)
             {
                 state.Speaking = true; state.SilentFrames = 0; state.Pending.Clear();
+                state.SpeechId = Wire.Id();
+                state.SpeechStarted = Stopwatch.GetTimestamp();
+                Trace(call, "voice", "started", state.SpeechId);
                 foreach (var previous in state.PreRoll) state.Pending.AddRange(previous);
                 state.PreRoll.Clear();
                 BeginUserSpeech(call);
@@ -726,6 +817,11 @@ public sealed partial class CallService
         }
         if (state.Speaking)
         {
+            if (voice)
+            {
+                state.LastVoiceTick = Stopwatch.GetTimestamp();
+                state.LastVoiceMediaMs = mediaMs;
+            }
             state.Pending.AddRange(pcm.ToArray());
             state.SilentFrames = voice ? 0 : state.SilentFrames + 1;
             var maxSamples = settings.ConversationUtteranceSeconds * 32000;
@@ -741,32 +837,43 @@ public sealed partial class CallService
         uint generation;
         lock (state.Gate)
         {
+            if (state.Ended || call.Ended) return;
+            state.UserGeneration++;
+            if (call.PhoneAssistant) state.LastUserTurnId = null;
             call.PlaybackGeneration++;
             generation = (uint)call.PlaybackGeneration;
             state.Playback?.Cancel(); state.Playback = null;
+            call.Phone?.Outbound.Clear();
         }
         var phone = call.Phone;
-        phone?.Outbound.Clear();
         _ = phone?.TextAsync(Wire.Encode(new { type = "interrupt", generation }));
         _ = phone?.TextAsync(Wire.Encode(new { type = "conversation", status = "listening" }));
         if (call.UsesAgent)
-            _ = agents.SendControlAsync(call.AgentId, "call.interrupted", new { callId = call.Id, generation, reason = "user_speech" });
+            _ = agents.SendControlAsync(call.AgentId, "call.interrupted", new { callId = call.Id, sessionId = call.SessionId, generation, reason = "user_speech" });
     }
 
     private void FinalizeUtterance(Call call, ConversationState state)
     {
         if (!state.Speaking) return;
         state.Speaking = false;
+        var trimFrames = call.PhoneAssistant ? Math.Max(0, state.SilentFrames - PhoneAssistantTailFrames) : 0;
         state.SilentFrames = 0;
         state.PreRoll.Clear();
-        var pcm = state.Pending.ToArray();
+        var pcm = new byte[state.Pending.Count - trimFrames * AudioBytes];
+        state.Pending.CopyTo(0, pcm, 0, pcm.Length);
         state.Pending.Clear();
+        var id = state.SpeechId!;
         if (pcm.Length < AudioBytes * 8)
         {
+            Trace(call, "voice", "cancelled", id, state.SpeechStarted, "voice_too_short");
             _ = call.Phone?.TextAsync(Wire.Encode(new { type = "conversation", status = "idle" }));
             return;
         }
-        if (!state.Utterances.Writer.TryWrite(pcm))
+        var turn = new Utterance(pcm, id, state.LastVoiceTick, Stopwatch.GetTimestamp(),
+            state.LastVoiceMediaMs, state.UserGeneration);
+        Trace(call, "voice", turnId: id, started: state.SpeechStarted, frames: pcm.Length / AudioBytes);
+        PhoneTiming(call, turn.Id, "vad_end", turn.LastVoiceTick);
+        if (!state.Utterances.Writer.TryWrite(turn))
         {
             _ = EndAsync(call, "degraded");
             return;
@@ -778,39 +885,74 @@ public sealed partial class CallService
     {
         try
         {
-            await foreach (var pcm in state.Utterances.Reader.ReadAllAsync(call.Cts.Token))
+            await foreach (var turn in state.Utterances.Reader.ReadAllAsync(call.Cts.Token))
             {
+                var sttStarted = Stopwatch.GetTimestamp();
+                Trace(call, "stt", "started", turn.Id, frames: turn.Pcm.Length / AudioBytes);
+                PhoneTiming(call, turn.Id, "stt_queue", turn.ReadyTick);
                 string? text = null, error = null;
                 try
                 {
-                    text = await stt.RecognizeAsync(Wav(pcm), call.Cts.Token);
+                    text = await stt.RecognizeAsync(Wav(turn.Pcm), call.Cts.Token);
+                    if (text.Length > 4000)
+                    {
+                        text = null;
+                        error = "stt_reply_too_long";
+                    }
                 }
                 catch (SpeechException exception)
                 {
                     error = exception.Code;
                 }
+                PhoneTiming(call, turn.Id, "vosk_complete", sttStarted);
+                Trace(call, "stt", text is null ? "failed" : "completed", turn.Id, sttStarted, error);
                 if (text != null)
                 {
-                    var turnId = RecordTurn(call, "user", text, status: "complete");
-                    state.LastUserTurnId = turnId;
-                    await SendTranscript(call, turnId, "user", text, "complete", null);
-                    if (call.UsesAgent && !await agents.SendControlAsync(call.AgentId, "dialog.user", new
+                    var turnId = RecordTurn(call, "user", text, status: "complete", id: turn.Id);
+                    lock (state.Gate)
                     {
-                        callId = call.Id, sessionId = call.SessionId, turnId, text, at = Wire.Now
-                    }))
-                        await EndAsync(call, "disconnected");
+                        if (call.PhoneAssistant && state.UserGeneration != turn.UserGeneration)
+                        {
+                            Trace(call, "agent_delivery", "cancelled", turnId, code: "superseded_utterance");
+                            continue;
+                        }
+                        state.LastUserTurnId = turnId;
+                    }
+                    if (call.PhoneAssistant && settings.PhoneAssistantTiming)
+                        await call.Phone!.TextAsync(Wire.Encode(new { type = "assistant_timing", turnId, lastVoiceMediaMs = turn.LastVoiceMediaMs }));
+                    await SendTranscript(call, turnId, "user", text, "complete", null);
+                    if (call.UsesAgent)
+                    {
+                        lock (state.Gate) state.Delivered.Add(turnId);
+                        var delivery = Stopwatch.GetTimestamp();
+                        Trace(call, "agent_delivery", "started", turnId);
+                        var delivered = await agents.SendControlAsync(call.AgentId, "dialog.user", new
+                        {
+                            callId = call.Id, sessionId = call.SessionId, turnId, text, at = Wire.Now
+                        });
+                        Trace(call, "agent_delivery", delivered ? "completed" : "failed", turnId, delivery);
+                        if (!delivered) await EndAsync(call, "disconnected");
+                        PhoneTiming(call, turnId, "agent_delivery", delivery);
+                    }
                 }
                 else
                 {
-                    var turnId = RecordTurn(call, "user", "", status: "error", error: error ?? "stt_unavailable");
-                    state.LastUserTurnId = turnId;
+                    var turnId = RecordTurn(call, "user", "", status: "error", error: error ?? "stt_unavailable", id: turn.Id);
+                    lock (state.Gate)
+                    {
+                        if (call.PhoneAssistant && state.UserGeneration != turn.UserGeneration) continue;
+                        state.LastUserTurnId = turnId;
+                    }
                     await SendTranscript(call, turnId, "user", "", "error", error ?? "stt_unavailable");
                     if (call.UsesAgent)
                         await agents.SendControlAsync(call.AgentId, "dialog.error", new
                         {
                             callId = call.Id, sessionId = call.SessionId, turnId, error = error ?? "stt_unavailable"
                         });
+                    if (call.PhoneAssistant)
+                        await SayAsync(call, "Не удалось распознать речь. Повторите, пожалуйста.", turnId);
                 }
+                SaveTrace(call);
             }
         }
         catch (OperationCanceledException) { }
@@ -840,105 +982,197 @@ public sealed partial class CallService
         return wav;
     }
 
-    private Task SendTranscript(Call call, string turnId, string speaker, string text, string status, string? error) =>
+    private Task SendTranscript(Call call, string turnId, string speaker, string text, string status, string? error, string? replyTo = null) =>
         call.Phone?.TextAsync(Wire.Encode(new
         {
             type = "transcript",
-            turn = new { id = turnId, speaker, text, at = Wire.Now, final = true, status, error }
+            turn = new { id = turnId, speaker, text, at = Wire.Now, final = true, status, error, replyTo }
         })) ?? Task.CompletedTask;
 
-    private async Task SayAsync(Call call, string? text, string? turnId)
+    private Task SayAsync(Call call, string? text, string? turnId, bool greeting = false)
     {
-        if (call.Mode != "conversation" || call.Conversation is not { } state) return;
+        if (call.Mode != "conversation" || call.Conversation is not { } state) return Task.CompletedTask;
         if (string.IsNullOrWhiteSpace(text) || text.Length > 1000 || text.Any(c => char.IsControl(c) && c is not ('\n' or '\t' or '\r')))
-            return;
+            return Task.CompletedTask;
         uint generation; CancellationTokenSource playback;
         lock (state.Gate)
         {
-            if (state.Ended || call.Ended || call.Status != "active") return;
-            if (call.UsesAgent)
+            if (state.Ended || call.Ended || call.Status != "active") return Task.CompletedTask;
+            if (greeting)
+            {
+                if (state.UserGeneration != 0) return Task.CompletedTask;
+            }
+            else if (call.UsesAgent)
             {
                 var replyTo = turnId ?? state.LastUserTurnId;
-                if (replyTo == null || !state.Answered.Add(replyTo)) return;
+                if (replyTo == null || (call.PhoneAssistant && replyTo != state.LastUserTurnId) ||
+                    !state.Answered.Add(replyTo)) return Task.CompletedTask;
             }
             call.PlaybackGeneration++;
             generation = (uint)call.PlaybackGeneration;
             state.Playback?.Cancel();
             playback = CancellationTokenSource.CreateLinkedTokenSource(call.Cts.Token);
             state.Playback = playback;
+            call.Phone?.Outbound.Clear();
         }
-        call.Phone?.Outbound.Clear();
-        _ = call.Phone?.TextAsync(Wire.Encode(new { type = "interrupt", generation }));
-        _ = PlayConversationSpeechAsync(call, state, text, generation, playback);
+        _ = PlayConversationSpeechAsync(call, state, text, turnId, generation, playback, greeting);
+        return Task.CompletedTask;
     }
 
-    private async Task PlayConversationSpeechAsync(Call call, ConversationState state, string text, uint generation, CancellationTokenSource playback)
+    private async Task PlayConversationSpeechAsync(Call call, ConversationState state, string text, string? userTurnId,
+        uint generation, CancellationTokenSource playback, bool greeting)
     {
+        var received = Stopwatch.GetTimestamp();
+        var replyId = Wire.Id();
+        long? ttsStarted = null;
+        var ttsFinished = false;
+        long? playbackStarted = null;
+        var playbackStatus = "cancelled";
+        var playbackStage = greeting ? "greeting" : "playback";
+        var frames = 0;
+        string? endReason = null;
+        var phone = call.Phone!;
+        PlaybackReceipt? receipt = null;
+        if (!greeting) PhoneTiming(call, userTurnId, "agent_reply_received");
         try
         {
             ReadOnlyMemory<byte> pcm;
+            if (!await phone.TextAsync(Wire.Encode(new { type = "interrupt", generation }))) return;
             try
             {
-                var wav = await speech.WithWav(text, ConversationMaxPcm + 4096, async (stream, length, token) =>
+                playback.Token.ThrowIfCancellationRequested();
+                if (greeting) pcm = PhoneGreeting.Value;
+                else
                 {
-                    var bytes = new byte[(int)length];
-                    await stream.ReadExactlyAsync(bytes, token);
-                    using var input = new MemoryStream(bytes, writable: false);
-                    AudioService.ValidateWav(input, length, out var offset, out var count);
-                    if (count > ConversationMaxPcm) throw new SpeechException("agent_reply_too_long");
-                    return bytes.AsMemory(offset, count);
-                }, playback.Token);
-                pcm = wav;
+                    ttsStarted = Stopwatch.GetTimestamp();
+                    Trace(call, "tts", "started", userTurnId, replyId: replyId);
+                    PhoneTiming(call, userTurnId, "silero_queue", received);
+                    pcm = await speech.WithWav(text, ConversationMaxPcm + 4096, async (stream, length, token) =>
+                    {
+                        PhoneTiming(call, userTurnId, "silero_headers", ttsStarted);
+                        var bytes = new byte[(int)length];
+                        await stream.ReadExactlyAsync(bytes, token);
+                        using var input = new MemoryStream(bytes, writable: false);
+                        AudioService.ValidateWav(input, length, out var offset, out var count);
+                        if (count > ConversationMaxPcm) throw new SpeechException("agent_reply_too_long");
+                        return bytes.AsMemory(offset, count);
+                    }, playback.Token);
+                    PhoneTiming(call, userTurnId, "silero_complete", ttsStarted);
+                    Trace(call, "tts", turnId: userTurnId, started: ttsStarted, replyId: replyId);
+                    ttsFinished = true;
+                }
             }
-            catch (SpeechException error)
+            catch (Exception error) when (error is SpeechException or Fault { Code: "invalid_audio" or "audio_too_long" or "audio_too_large" })
             {
-                var id = RecordTurn(call, "agent", "", status: "error", error: error.Code);
-                await SendTranscript(call, id, "agent", "", "error", error.Code);
-                await agents.SendControlAsync(call.AgentId, "call.speech_error", new { callId = call.Id, error = error.Code });
-                return;
+                playback.Token.ThrowIfCancellationRequested();
+                var code = error is SpeechException speechError ? speechError.Code : "invalid_tts_audio";
+                Trace(call, "tts", "failed", userTurnId, ttsStarted, code, replyId: replyId);
+                ttsFinished = true;
+                RecordTurn(call, "agent", text, status: "error", error: code, id: replyId, replyTo: userTurnId);
+                await SendTranscript(call, replyId, "agent", text, "error", code, userTurnId);
+                _ = agents.SendControlAsync(call.AgentId, "call.speech_error", new { callId = call.Id, sessionId = call.SessionId, turnId = userTurnId, error = code });
+                if (!call.PhoneAssistant) return;
+                replyId = Wire.Id();
+                text = "Не удалось озвучить ответ. Попробуйте повторить вопрос.";
+                pcm = PhoneSpeechUnavailable.Value;
             }
             await WaitForAudioAsync(call, playback.Token);
             if (call.Ended || call.PlaybackGeneration != generation) return;
-            var turnId = RecordTurn(call, "agent", text, status: "complete");
-            await SendTranscript(call, turnId, "agent", text, "complete", null);
-            await call.Phone!.TextAsync(Wire.Encode(new { type = "conversation", status = "speaking", turnId }));
-            var phone = call.Phone!;
+            RecordTurn(call, "agent", text, status: "complete", id: replyId, replyTo: userTurnId);
+            await SendTranscript(call, replyId, "agent", text, "complete", null, userTurnId);
+            var expectedFrames = (pcm.Length + AudioBytes - 1) / AudioBytes;
+            if (!await phone.TextAsync(Wire.Encode(new { type = "conversation", status = "speaking", turnId = replyId,
+                userTurnId, generation, expectedFrames })))
+                return;
+            var reportPlayback = call.PhoneAssistant && agents.WantsPlaybackStatus(call.AgentId);
+            if (reportPlayback)
+                _ = agents.SendControlAsync(call.AgentId, "call.playback", new { callId = call.Id, sessionId = call.SessionId,
+                    turnId = userTurnId, status = "started", generation });
             for (var offset = 0; offset < pcm.Length; offset += AudioBytes)
             {
                 playback.Token.ThrowIfCancellationRequested();
-                if (call.PlaybackGeneration != generation) return;
                 var frame = new byte[FrameBytes];
                 var index = (uint)(offset / AudioBytes);
-                BinaryPrimitives.WriteUInt32BigEndian(frame, state.PhoneSequence++);
                 BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(4), index * 20);
                 BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(8), generation);
                 pcm.Slice(offset, Math.Min(AudioBytes, pcm.Length - offset)).Span.CopyTo(frame.AsSpan(HeaderBytes));
-                if (!phone.Outbound.TryEnqueue(frame))
+                bool queued;
+                lock (state.Gate)
                 {
-                    _ = EndAsync(call, "degraded");
+                    if (call.PlaybackGeneration != generation) return;
+                    var sequence = state.PhoneSequence++;
+                    BinaryPrimitives.WriteUInt32BigEndian(frame, sequence);
+                    if (index + 1 == expectedFrames)
+                    {
+                        receipt = new PlaybackReceipt(sequence, generation);
+                        Volatile.Write(ref phone.PendingPlayback, receipt);
+                    }
+                    queued = phone.Outbound.TryEnqueue(frame);
+                }
+                if (!queued)
+                {
+                    playbackStatus = "failed";
+                    endReason = "degraded";
                     return;
+                }
+                frames++;
+                if (offset == 0)
+                {
+                    playbackStarted = Stopwatch.GetTimestamp();
+                    Trace(call, playbackStage, "started", userTurnId, replyId: replyId);
+                    PhoneTiming(call, userTurnId, "first_audio_queued", received);
                 }
                 await Task.Delay(20, playback.Token);
             }
-            await Task.Delay(200, playback.Token);
-            if (call.PlaybackGeneration == generation) await phone.TextAsync(Wire.Encode(new { type = "conversation", status = "idle" }));
+            await receipt!.Sent.Task.WaitAsync(TimeSpan.FromSeconds(2), playback.Token);
+            if (call.PlaybackGeneration == generation)
+            {
+                playbackStatus = "completed";
+                await phone.TextAsync(Wire.Encode(new { type = "conversation", status = "idle", generation }));
+                if (reportPlayback && call.PlaybackGeneration == generation)
+                    _ = agents.SendControlAsync(call.AgentId, "call.playback", new { callId = call.Id, sessionId = call.SessionId,
+                        turnId = userTurnId, status = "completed", generation });
+            }
         }
         catch (OperationCanceledException) { }
+        catch (TimeoutException)
+        {
+            playbackStatus = "failed";
+            endReason = "degraded";
+        }
         catch (Exception exception)
         {
             log.LogWarning("Call {CallId} conversation speech failed: {Type}", call.Id, exception.GetType().Name);
-            if (!state.Ended && !call.Ended) _ = EndAsync(call, "disconnected");
+            if (!state.Ended && !call.Ended) endReason = "disconnected";
         }
         finally
         {
+            if (receipt is not null) Interlocked.CompareExchange(ref phone.PendingPlayback, null, receipt);
+            if (ttsStarted is not null && !ttsFinished)
+                Trace(call, "tts", call.Ended ? "cancelled" : playback.IsCancellationRequested ? "interrupted" : "failed",
+                    userTurnId, ttsStarted, replyId: replyId);
+            if (playbackStarted is not null)
+                Trace(call, playbackStage, playbackStatus == "cancelled" && !call.Ended ? "interrupted" : playbackStatus,
+                    userTurnId, playbackStarted, frames: frames, replyId: replyId);
             lock (state.Gate) if (ReferenceEquals(state.Playback, playback)) state.Playback = null;
             playback.Dispose();
+            if (endReason is not null) _ = EndAsync(call, endReason);
         }
+    }
+
+    private void PhoneTiming(Call call, string? turnId, string stage, long? started = null)
+    {
+        if (!call.PhoneAssistant || !settings.PhoneAssistantTiming) return;
+        var ticks = Stopwatch.GetTimestamp();
+        log.LogInformation("PhoneTiming {CallId} {TurnId} {Stage} ticks={Ticks} frequency={Frequency} elapsedMs={ElapsedMs}",
+            call.Id, turnId, stage, ticks, Stopwatch.Frequency,
+            started is { } start ? Stopwatch.GetElapsedTime(start, ticks).TotalMilliseconds : null);
     }
     private async Task HandleAgentDisconnected(Agent agent)
     {
-        Call? call; lock (sync) call = calls.Values.FirstOrDefault(c => c.AgentId == agent.Id && !c.Ended);
-        if (call != null) await EndAsync(call, "disconnected");
+        Call[] affected;
+        lock (sync) affected = calls.Values.Where(c => c.AgentId == agent.Id && !c.Ended).ToArray();
+        await Task.WhenAll(affected.Select(call => EndAsync(call, "disconnected")));
     }
 
     private async Task RingTimerAsync(Call call)
@@ -966,15 +1200,27 @@ public sealed partial class CallService
             if (call.Ended || expectedStatus != null && call.Status != expectedStatus) return false;
             call.Ended = true; call.Status = "ended"; call.Reason = reason; call.EndedAt = Wire.Now;
             if (currentId == call.Id) currentId = null;
+            if (phoneAssistantCallId == call.Id) phoneAssistantCallId = null;
             phone = call.Phone; agentMedia = call.AgentMedia; deviceId = call.DeviceId;
         }
+        call.AgentDecision?.TrySetResult(false);
         if (call.Conversation is { } conversation)
         {
-            conversation.Ended = true;
-            conversation.Utterances.Writer.TryComplete();
-            conversation.Playback?.Cancel();
+            lock (conversation.Gate)
+            {
+                conversation.Ended = true;
+                if (conversation.Speaking)
+                    Trace(call, "voice", "cancelled", conversation.SpeechId, conversation.SpeechStarted, reason);
+                conversation.Utterances.Writer.TryComplete();
+                conversation.Playback?.Cancel();
+            }
         }
         call.Cts.Cancel();
+        if (phone is not null)
+            Trace(call, "phone_frames", source: "api", frames: Interlocked.Read(ref phone.SentFrames),
+                receivedFrames: Interlocked.Read(ref phone.ReceivedFrames), droppedFrames: Interlocked.Read(ref phone.DroppedFrames));
+        Trace(call, "call_ended", started: call.TraceStarted, code: reason);
+        SaveTrace(call);
         log.LogInformation("Call {CallId} ({Direction}) ended: {Reason}", call.Id, call.Direction, reason);
         try
         {
@@ -989,7 +1235,7 @@ public sealed partial class CallService
             if (call.Direction == "incoming" && call.Target == "android") _ = PushCallAsync(call, reason is "rejected" or "missed" or "disconnected" or "revoked" ? reason : "ended");
             await CallShutdown.RunAsync(
                 ct => call.UsesAgent && call.Playback.IsEmpty
-                    ? agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, reason }, ct)
+                    ? agents.SendControlAsync(call.AgentId, "call.ended", new { callId = call.Id, inviteId = call.InviteId, sessionId = call.SessionId, reason }, ct)
                     : Task.CompletedTask,
                 ct => phone?.TextAsync(Wire.Encode(new { type = "ended", reason }), ct) ?? Task.CompletedTask,
                 () => CloseSide(phone, reason), () => CloseSide(agentMedia, reason),

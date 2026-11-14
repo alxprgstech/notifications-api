@@ -90,7 +90,7 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
             SileroSpeech.ValidateText(text);
             var (agentId, agentName) = ResolveAgent(actor);
             var fingerprint = Fingerprint(title, text, agentId, target);
-            calls.EnsureIdle();
+            calls.EnsureIdle(target);
             calls.EnsureTarget(target);
             var pcm = await speech.WithWav(text, MaxPcmBytes + 4096, async (stream, length, token) =>
             {
@@ -147,7 +147,7 @@ public sealed class ChatGptCall(Database db, CallService calls, SileroSpeech spe
     private Agent ResolveBoundAgent(Actor actor, string sessionId)
     {
         var online = OnlineAgent(actor);
-        if (!online.Sessions.Any(session => session.Id == sessionId)) throw new Fault(400, "invalid_session");
+        if (!CallService.IsOrdinarySession(online.Sessions, sessionId)) throw new Fault(400, "invalid_session");
         return online.Agent;
     }
 

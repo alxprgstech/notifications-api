@@ -51,7 +51,8 @@ def _error_code(response: httpx.Response) -> str:
 
 class NotifyClient:
     def __init__(self, base_url: str, token: str, *, timeout: float = 35):
-        self.http = httpx.Client(base_url=_url(base_url), headers={"Authorization": f"Bearer {token}"}, timeout=timeout, follow_redirects=False)
+        headers = {"Authorization": f"Bearer {token}"} if token else None
+        self.http = httpx.Client(base_url=_url(base_url), headers=headers, timeout=timeout, follow_redirects=False)
 
     def close(self) -> None:
         self.http.close()
@@ -102,6 +103,12 @@ class NotifyClient:
 
     def call_status(self, call_id: str) -> dict[str, Any]:
         return _result(self.http.get(f"/api/v1/calls/{_id(call_id)}"))
+
+    def call_history(self) -> list[dict[str, Any]]:
+        return _result(self.http.get("/api/v1/calls"))
+
+    def call_trace(self, call_id: str) -> dict[str, Any]:
+        return _result(self.http.get(f"/api/v1/calls/{_id(call_id)}/trace"))
 
     def start_conversation(self, title: str, *, idempotency_key: str, target: str = "android", session_id: str | None = None) -> dict[str, Any]:
         payload = {"title": title, "idempotencyKey": idempotency_key, "target": target, "sessionId": session_id}

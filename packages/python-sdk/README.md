@@ -31,3 +31,18 @@ Use target="asterisk" with announce_call(), start_conversation(), or
 AgentConnector.dial_call() to ring the configured SIP phone. Android is the
 default. Use call_status() to check the returned call ID. A retry with the same
 idempotency key and identical arguments returns the same call.
+# Диагностика звонков
+
+Установите Python SDK в отдельное окружение. Команда `notifyctl` входит в пакет и использует его HTTPS-клиент. Передайте `NOTIFY_URL` и `NOTIFY_TOKEN` через окружение. Для истории и трассировки токену источника требуется `agents:connect`. `status` проверяет публичные health-эндпоинты.
+
+```text
+notifyctl status
+notifyctl doctor
+notifyctl calls list --since 2026-11-01 --status ended
+notifyctl calls show <call-id>
+notifyctl --json calls trace <call-id>
+notifyctl calls stats
+notifyctl diagnostics export <call-id>
+```
+
+Экспорт выводит JSON с идентификаторами и стадиями вызова. Расшифровки и токен в экспорт не входят.

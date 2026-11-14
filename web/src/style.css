@@ -1,19 +1,19 @@
 
 :root {
   color-scheme: light;
-  --canvas: #f7f8fa;
+  --canvas: #f3f5fa;
   --surface: #fff;
-  --surface-2: #f1f3f6;
-  --hover: #e9edf3;
-  --line: #e0e5ed;
+  --surface-2: #f9fafd;
+  --hover: #ddeef1;
+  --line: #dce2ed;
   --control: #8794a6;
-  --text: #111722;
-  --muted: #505d70;
-  --link: #2058c7;
-  --accent: #245bd0;
-  --accent-hover: #1848af;
+  --text: #17243a;
+  --muted: #4a5d74;
+  --link: #006a70;
+  --accent: #006a70;
+  --accent-hover: #00565c;
   --on-accent: #fff;
-  --focus: #2058c7;
+  --focus: #006a70;
   --info: #194dab;
   --info-bg: #edf3ff;
   --success: #17643a;
@@ -35,19 +35,19 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --canvas: #0a0c10;
-  --surface: #10141b;
-  --surface-2: #171d27;
-  --hover: #202837;
-  --line: #293343;
+  --canvas: #141821;
+  --surface: #202736;
+  --surface-2: #181d28;
+  --hover: #25434b;
+  --line: #343f54;
   --control: #6b7a90;
-  --text: #f2f5fa;
-  --muted: #aab7cb;
-  --link: #93b9ff;
-  --accent: #82afff;
-  --accent-hover: #a5c8ff;
-  --on-accent: #0b1a35;
-  --focus: #93b9ff;
+  --text: #f2f5fc;
+  --muted: #b9c8db;
+  --link: #75ded2;
+  --accent: #75ded2;
+  --accent-hover: #a2eee6;
+  --on-accent: #102a2b;
+  --focus: #75ded2;
   --info: #a8c8ff;
   --info-bg: #182943;
   --success: #89e3ad;
@@ -191,7 +191,7 @@ kbd { border: 1px solid var(--line); border-radius: 5px; background: var(--surfa
 .date-heading { padding: 0 0 8px 3px; font-size: .78rem; letter-spacing: .025em; color: var(--muted); font-weight: 650; }
 .date-heading::first-letter { text-transform: uppercase; }
 .event-list, .call-list { margin: 0; padding: 0; list-style: none; }
-.event-list li + li, .call-list li + li { border-top: 1px solid var(--line); }
+.event-list li + li, .call-list > li + li { border-top: 1px solid var(--line); }
 .event-row {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: start; gap: 14px;
   width: 100%; padding: 17px; border: 0; border-radius: 9px; background: transparent; text-align: left;
@@ -255,7 +255,7 @@ kbd { border: 1px solid var(--line); border-radius: 5px; background: var(--surfa
 .agent-heading, .tags { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; overflow-wrap: anywhere; }
 .tags .badge { background: var(--surface); }
 .entity-footer { margin-top: 14px; }
-.call-list li { display: grid; grid-template-columns: auto minmax(0, 2fr) minmax(92px, 1fr) 165px; gap: 12px; align-items: center; padding: 14px 16px; }
+.call-list > li { display: grid; grid-template-columns: auto minmax(0, 2fr) minmax(92px, 1fr) 165px; gap: 12px; align-items: center; padding: 14px 16px; }
 .call-party, .call-result { overflow-wrap: anywhere; }
 .call-list strong { display: block; }
 .call-list .badge { justify-self: end; }
@@ -421,7 +421,7 @@ body:has(.dialog[open]) { overflow: hidden; }
   .row-arrow { display: none; }
   .entity-icon { width: 36px; height: 36px; }
   .entity-card { padding: 12px; }
-  .call-list li { grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; padding: 10px; }
+  .call-list > li { grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; padding: 10px; }
   .call-list .badge { grid-column: 2 / -1; justify-self: start; }
   .workspace-footer { margin-top: 28px; }
   .detail-dialog { border-radius: 0; padding: 16px; }
@@ -435,3 +435,13 @@ body:has(.dialog[open]) { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+.overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 12px; margin-bottom: 24px; }
+.overview-card { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; text-align: start; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; cursor: pointer; }
+.overview-card:hover { background: var(--hover); }
+.overview-card span { grid-column: 1 / -1; color: var(--muted); }
+.overview-card strong { font-size: 1.45rem; }
+.overview-card svg { color: var(--link); }
+.call-trace-scale { position: relative; height: 32px; margin: .75rem 8px .5rem 0; border-block: 1px solid currentColor; }
+.call-trace-scale span { position: absolute; width: 5px; height: 7px; border-radius: 2px; background: currentColor; }
+.call-trace-scale .call-trace-failure { background: #d14d59; }
+.call-trace-events { padding-inline-start: 1.5rem; max-height: 18rem; overflow: auto; overflow-wrap: anywhere; }

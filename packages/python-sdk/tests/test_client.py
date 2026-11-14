@@ -7,6 +7,11 @@ from alxprgs_notify import NotifyClient, AsyncNotifyClient, NotifyError, verify_
 
 
 class ClientTests(unittest.TestCase):
+    def test_health_request_without_token_omits_authorization(self):
+        with NotifyClient("https://example.com", "") as client:
+            request = client.http.build_request("GET", "/health/ready")
+            self.assertNotIn("Authorization", request.headers)
+
     def test_form_payload_and_limits(self):
         captured = {}
 

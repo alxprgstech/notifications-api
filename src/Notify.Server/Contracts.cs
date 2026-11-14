@@ -52,7 +52,8 @@ public sealed record CallChallengeInput(string SourceId, string? SessionId = nul
 public sealed record CallAcceptInput(string? ChallengeId = null, string? Signature = null);
 public sealed record CallChallenge(string Id, string DeviceId, string Payload, long ExpiresAt);
 public sealed record CallChallengeProof(string Protocol, string ChallengeId, string DeviceId, string Direction, string Action, string SourceId, string AgentId, string? SessionId, string? CallId, string? InviteId, string SecurityLevel, string Nonce, long ExpiresAt);
-public sealed record CallTurn(string Id, string Speaker, string Text, long At, bool Final = true, string? Status = null, string? Error = null);
+public sealed record CallTurn(string Id, string Speaker, string Text, long At, bool Final = true, string? Status = null,
+    string? Error = null, string? ReplyTo = null);
 public sealed record CallTranscript(string CallId, string ProtectedTurns, bool Partial, string? Error, long UpdatedAt);
 public sealed record CallRecord(string Id, string SourceId, string AgentId, string? DeviceId, string? SessionId, string SecurityLevel, long StartedAt, long EndedAt, string Status, string? Reason, int DurationMs, string Direction = "outgoing", bool HasTranscript = false, bool TranscriptPartial = false, string Target = "android");
 public sealed record AgentCommand(string Id, string AgentId, string SourceId, string Type, string Payload, long CreatedAt, long ExpiresAt, string Status = "queued", int Attempts = 0, long? AckedAt = null, string? CorrelationId = null, string? SessionId = null);
@@ -101,6 +102,10 @@ public sealed class Settings
     public int CallMediaConnectSeconds { get; init; } = 10;
     public int CallQueueFrames { get; init; } = 100;
     public int CallAudioStartDelayMs { get; init; } = 3000;
+    public string PhoneAssistantExtension { get; init; } = "";
+    public string PhoneAssistantBridgeSourceId { get; init; } = "";
+    public string PhoneAssistantAgentId { get; init; } = "";
+    public bool PhoneAssistantTiming { get; init; }
     public bool SsoConfigured => Guid.TryParse(OwnerSub, out _) && WebClientSecret.Length >= 16;
     public void Validate(bool development)
     {
@@ -119,8 +124,14 @@ public sealed class Settings
         if (AgentHeartbeatSeconds is < 1 or > 60 || AgentOfflineSeconds < AgentHeartbeatSeconds * 2 || AgentOfflineSeconds > 600 || AgentSendTimeoutSeconds is < 1 or > 30) throw new InvalidOperationException("Invalid agent heartbeat/offline limits");
         if (AudioQuotaBytes is < 1L * 1024 * 1024 or > 50L * 1024 * 1024 * 1024 || AudioUploadMinutes is < 1 or > 60 || AudioMessageTtlDays is < 1 or > 30) throw new InvalidOperationException("Invalid audio quota/upload/retention limits");
         if (CallAudioStartDelayMs is < 0 or > 10000) throw new InvalidOperationException("Invalid call audio start delay");
+        if (PhoneAssistantExtension.Length != 0 &&
+            (PhoneAssistantExtension.Length is < 2 or > 8 || !PhoneAssistantExtension.All(char.IsAsciiDigit) ||
+             !ValidPhoneAssistantId(PhoneAssistantBridgeSourceId) || !ValidPhoneAssistantId(PhoneAssistantAgentId)))
+            throw new InvalidOperationException("The phone assistant requires an extension, a bridge source ID and an agent ID");
         if (CallRingSeconds is < 1 or > 120 || CallMaxMinutes is < 1 or > 120 || CallMediaConnectSeconds is < 1 or > 60 || CallQueueFrames is < 1 or > 200) throw new InvalidOperationException("Invalid call limits");
         if (ConversationUtteranceSeconds is < 3 or > 30 || ConversationSilenceMilliseconds is < 300 or > 2000) throw new InvalidOperationException("Invalid conversation limits");
         if (!string.IsNullOrEmpty(SttUrl) && (!Uri.TryCreate(SttUrl, UriKind.Absolute, out var stt) || stt.Scheme is not ("http" or "https") || stt.UserInfo.Length != 0 || stt.Query.Length != 0 || stt.Fragment.Length != 0)) throw new InvalidOperationException("SttUrl must be an HTTP(S) base URL without credentials or query");
     }
+
+    private static bool ValidPhoneAssistantId(string id) => id.Length == 32 && id.All(char.IsAsciiHexDigitLower);
 }

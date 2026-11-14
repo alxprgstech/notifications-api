@@ -601,7 +601,7 @@ internal static class OpenApiDocs
             """{"sourceId":"abcdef0123456789abcdef0123456789","sessionId":"task-1","securityLevel":"elevated"}"""));
 
         Add("POST", "/api/v1/calls", new("startCall", "Звонки", "Начать исходящий звонок",
-            "Создаёт исходящий звонок владельца агенту. Одновременно допускается один звонок; второй получает 409 `busy`. Elevated требует `challengeId` и `signature`; для standard эти поля должны отсутствовать. `mode=one_shot` — обычный живой звонок с ретрансляцией медиа; `mode=conversation` — разговор без кнопки «Говорить»: сервер распознаёт русскую речь локально, передаёт реплики только в выбранную `sessionId` агента и озвучивает ответ серверным Silero. Conversation требует настроенный STT (`503 stt_unavailable`). Сервер отправляет агенту `call.invite`; звонок переходит в `connecting` после `call.accept` агента. Медиа — отдельный WebSocket.",
+            "Создаёт исходящий звонок владельца агенту. Второй обычный звонок получает 409 `busy`. Входящий SIP-вызов помощника может идти параллельно со звонком Android. Elevated требует `challengeId` и `signature`; для standard эти поля должны отсутствовать. `mode=one_shot` — обычный живой звонок с ретрансляцией медиа; `mode=conversation` — разговор без кнопки «Говорить»: сервер распознаёт русскую речь локально, передаёт реплики только в выбранную `sessionId` агента и озвучивает ответ серверным Silero. Conversation требует настроенный STT (`503 stt_unavailable`). Сервер отправляет агенту `call.invite`; звонок переходит в `connecting` после `call.accept` агента. Медиа — отдельный WebSocket.",
             ApiAuth.Bearer, [Ok<CallViewResponse>("Звонок создан и приглашение отправлено агенту."), .. callErrors],
             RequestBodyKind.Json, "Параметры исходящего звонка.",
             """{"sourceId":"abcdef0123456789abcdef0123456789","sessionId":"task-1","securityLevel":"standard","mode":"conversation"}"""));
@@ -640,12 +640,18 @@ internal static class OpenApiDocs
             Parameters: new() { ["id"] = "Id звонка." }));
 
         Add("GET", "/api/v1/calls", new("listCalls", "Звонки", "История звонков",
-            "Только владелец (`web`/`device`). Возвращает до 100 последних записей с метаданными: direction, deviceId, reason, durationMs, mode, hasTranscript. Аудио не сохраняется; текст доступен отдельным `GET /calls/{id}/transcript` и удаляется вместе с 30-дневной записью.",
+            "Владелец видит все звонки. Интеграция с `agents:connect` видит звонки своего источника. До 100 активных и завершённых записей. Расшифровки доступны отдельным GET и хранятся 30 дней.",
             ApiAuth.BearerOrWeb, [
                 OkArray<CallRecord>("История звонков.", """[{"id":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","sourceId":"abcdef0123456789abcdef0123456789","agentId":"ffffffffffffffffffffffffffffffff","deviceId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sessionId":"task-1","securityLevel":"standard","startedAt":1767225600000,"endedAt":1767225660000,"status":"ended","reason":"ended","durationMs":60000,"direction":"outgoing"}]"""),
                 Unauthorized,
-                Error(403, "Интеграции недоступно (`owner_required`).", """{"code":"owner_required"}"""),
+                Error(403, "Требуется доступ владельца или `agents:connect`."),
                 RateLimited, InternalError]));
+
+        Add("GET", "/api/v1/calls/{id}/trace", new("getCallTrace", "Звонки", "Этапы звонка",
+            "Возвращает события для текущего или завершённого звонка. Интеграция с `agents:connect` видит только свой источник. Длительности измеряются монотонными часами компонента. Тексты и аудио в события не входят.",
+            ApiAuth.BearerOrWeb, [Ok<CallTrace>("События звонка."), Unauthorized, Error(403, "Доступ запрещён."),
+                Error(404, "Звонок недоступен или события отсутствуют."), RateLimited, InternalError],
+            Parameters: new() { ["id"] = "Id звонка." }));
 
         Add("GET", "/api/v1/calls/incoming", new("getIncomingCall", "Звонки", "Текущий входящий звонок",
             "Только устройство. Возвращает актуальный входящий звонок в состоянии `ringing`; если приглашения нет — 404. `mode` показывает, будет ли это одна фраза (`one_shot`/`playback`) или разговор (`conversation`). Приглашение не включает микрофон: приложение показывает карточку и ждёт явного accept. Этот опрос — резервный путь, если FCM/full-screen intent недоступны.",
@@ -800,6 +806,23 @@ internal static class OpenApiDocs
                 Error(403, "Интеграции недоступно (`owner_required`).", """{"code":"owner_required"}"""),
                 RateLimited, InternalError]));
 
+        Add("GET", "/api/v1/telephony/assistant", new("getPhoneAssistantRoute", "Звонки", "Маршрут телефонного помощника",
+            "Возвращает внутренний номер агенту Notify Desktop, привязанному к телефонному маршруту. Требуется токен интеграции с правом `agents:connect`.",
+            ApiAuth.Bearer, [
+                Ok<PhoneAssistantRouteResponse>("Номер, наличие моста и доступность телефонной сессии.", """{"extension":"7820","bridgeOnline":true,"agentOnline":true,"sessionReady":true}"""),
+                Unauthorized,
+                Error(403, "Требуется право `agents:connect`.", """{"code":"insufficient_scope"}"""),
+                Error(404, "Маршрут не настроен для этого агента.", """{"code":"phone_assistant_not_configured"}"""),
+                RateLimited, InternalError]));
+
+        Add("GET", "/api/v1/agents/self", new("getSourceAgent", "Управление", "Агент текущего источника",
+            "Токен интеграции с правом `agents:connect` определяет источник. Запрос возвращает регистрацию и текущее состояние без открытия WebSocket.",
+            ApiAuth.Bearer, [
+                Ok<AgentSelfResponse>("Регистрация агента.", """{"agentId":"ffffffffffffffffffffffffffffffff","sourceId":"abcdef0123456789abcdef0123456789","name":"Мой компьютер","online":false,"capabilities":["realtime_audio"],"callProtocol":null,"supportedCallProtocols":["alxprgs.notify.call.v2"]}"""),
+                Unauthorized,
+                Error(403, "Требуется `agents:connect` и зарегистрированный агент.", """{"code":"agent_not_registered"}"""),
+                RateLimited, InternalError]));
+
         Add("GET", "/api/v1/sources", new("listSources", "Управление", "Источники и их права",
             "Владелец видит все источники, интеграция с `requests:read` — только себя. `protectedWebhookSecret` никогда не возвращается; webhook secret показывается один раз при создании интеграции.",
             ApiAuth.BearerOrWeb, [
@@ -904,7 +927,7 @@ internal static class OpenApiDocs
         ["CallStart"] = "Параметры исходящего звонка.",
         ["CallChallengeInput"] = "Параметры elevated-challenge исходящего звонка.",
         ["CallAcceptInput"] = "Параметры принятия входящего звонка.",
-        ["CallRecord"] = "Историческая запись завершённого звонка без аудио и расшифровок.",
+        ["CallRecord"] = "Состояние звонка для журнала без аудио и расшифровок.",
         ["Device"] = "Доверенное устройство владельца.",
         ["Delivery"] = "Подтверждение доставки события устройством.",
         ["ManagementInput"] = "Действие управления и его параметры.",
@@ -1003,7 +1026,7 @@ internal static class OpenApiDocs
         ["CallRecord.securityLevel"] = "`standard` или `elevated`.",
         ["CallRecord.startedAt"] = "Unix milliseconds начала.",
         ["CallRecord.endedAt"] = "Unix milliseconds завершения.",
-        ["CallRecord.status"] = "Историческая запись всегда `ended`.",
+        ["CallRecord.status"] = "`ringing`, `connecting`, `active` или `ended`.",
         ["CallRecord.reason"] = "Причина завершения: `rejected`, `missed`, `timeout`, `disconnected`, `unsupported`, `busy`, `invalid_audio`, `degraded`, `revoked`, `ended`.",
         ["CallRecord.durationMs"] = "Длительность активной части разговора.",
         ["CallRecord.direction"] = "`outgoing` (телефон → агент) или `incoming` (агент → телефон).",
@@ -1190,7 +1213,7 @@ internal static class OpenApiDocs
         ["CallStart.securityLevel"] = ["standard", "elevated"],
         ["CallChallengeInput.securityLevel"] = ["elevated"],
         ["CallRecord.securityLevel"] = ["standard", "elevated"],
-        ["CallRecord.status"] = ["ended"],
+        ["CallRecord.status"] = ["ringing", "connecting", "active", "ended"],
         ["CallRecord.direction"] = ["outgoing", "incoming"],
         ["CallRecord.reason"] = ["rejected", "missed", "timeout", "disconnected", "unsupported", "busy", "invalid_audio", "degraded", "revoked", "ended"],
         ["CallViewResponse.direction"] = ["outgoing", "incoming"],

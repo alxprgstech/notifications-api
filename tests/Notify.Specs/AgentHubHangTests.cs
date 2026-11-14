@@ -145,7 +145,7 @@ public sealed class AgentHubHangTests
     }
 
     [Fact]
-    public async Task ReplacingBlockedConnectionKeepsNewConnectionAndDeliversCommand()
+    public async Task DuplicatePreservesBlockedConnectionAndRetryDeliversCommand()
     {
         using var app = new AppFactory { AgentSendTimeoutSeconds = 5 }; var (sourceClient, source) = app.Integration(scopes: ["notify:send", "agents:connect"]); using (sourceClient)
         {
@@ -155,6 +155,13 @@ public sealed class AgentHubHangTests
             var firstRun = hub.Run(agent, first, CancellationToken.None);
             await first.Blocked.WaitAsync(TimeSpan.FromSeconds(2));
 
+            var duplicate = new ControlledSocket(); duplicate.PushJson(Hello(agent));
+            await hub.Run(agent, duplicate, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(duplicate.Closed);
+            Assert.False(first.Closed);
+            Assert.True(hub.IsOnline(agent.Id));
+            await Finish(hub, agent, first, firstRun);
+
             var second = new ControlledSocket(); second.PushJson(Hello(agent));
             var secondRun = hub.Run(agent, second, CancellationToken.None);
             try
@@ -163,7 +170,6 @@ public sealed class AgentHubHangTests
                 _ = await Next(second, ready.Token); // hello_ack
                 using var resent = JsonDocument.Parse(Wire.Encode(await Next(second, ready.Token)));
                 Assert.Equal(commandId, resent.RootElement.GetProperty("eventId").GetString());
-                await firstRun.WaitAsync(TimeSpan.FromSeconds(3));
                 Assert.True(first.Closed || first.Aborted);
                 Assert.True(hub.IsOnline(agent.Id));
                 Assert.False(second.Closed);

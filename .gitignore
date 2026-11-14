@@ -4,6 +4,7 @@
 **/dist/
 **/__pycache__/
 **/*.egg-info/
+/packages/python-sdk/build/
 **/.pytest_cache/
 **/.venv/
 **/TestResults/
@@ -23,3 +24,5 @@ service-account*.json
 
 /deploy/codemode/.wrangler/
 /deploy/codemode/.dev.vars*
+
+/AGENTS.override.md

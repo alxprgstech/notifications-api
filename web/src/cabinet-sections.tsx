@@ -23,6 +23,10 @@ export type Call = {
   startedAt: number; status: string; reason?: string; durationMs: number; direction?: string;
   mode?: string; hasTranscript?: boolean; transcriptPartial?: boolean;
 };
+type CallTraceEvent = { sequence: number; stage: string; status: string; source: string; offsetMs: number;
+  turnId?: string; durationMs?: number; code?: string; frames?: number; receivedFrames?: number; droppedFrames?: number; tokens?: number;
+  model?: string; agentThreadId?: string; replyId?: string };
+type CallTrace = { events: CallTraceEvent[]; truncated: boolean };
 export type ManagementInput =
   | { action: 'chatgpt.link' }
   | { action: 'chatgpt.permissions.update'; targetId: string; expectedRevision: number; scopes: string[] }
@@ -55,8 +59,9 @@ const callReasons: Record<string, string> = {
   rejected: 'Отклонён', missed: 'Нет ответа', timeout: 'Время истекло', disconnected: 'Связь прервана',
   unsupported: 'Не поддерживается', busy: 'Занято', invalid_audio: 'Ошибка аудио',
   degraded: 'Проблемы с сетью', revoked: 'Доступ отозван', ended: 'Завершён',
-  playback_sent: 'Фраза воспроизведена', interrupted: 'Прерван', stt_unavailable: 'STT недоступен',
+  playback_sent: 'Аудио отправлено', interrupted: 'Прерван', stt_unavailable: 'STT недоступен',
   stt_timeout: 'STT не успел', stt_empty: 'Речь не распознана',
+  ringing: 'Вызов', connecting: 'Соединение', active: 'Идёт разговор',
 };
 const dateTime = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 const dayFormat = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'full' });
@@ -187,6 +192,18 @@ export function EventDetail({ preview, full, sources, error, retry, close }: {
   </Dialog>;
 }
 
+function CopyId({ label, value }: { label: string; value: string }) {
+  const [feedback, setFeedback] = useState('');
+  return <div className="entity-controls">
+    <div><strong>{label}</strong><p><code>{value}</code></p></div>
+    <button className="button secondary" aria-label={`Скопировать ${label}`} onClick={async () => {
+      try { await navigator.clipboard.writeText(value); setFeedback(`Скопирован ${label}`); }
+      catch { setFeedback('Копирование недоступно. Выделите значение вручную.'); }
+    }}><Icon name="copy" size={16} /> Скопировать</button>
+    {feedback && <small role="status">{feedback}</small>}
+  </div>;
+}
+
 export function Integrations({ sources, agents, busy, open, manage, blocked }: {
   sources: Source[]; agents: Agent[]; busy: boolean; open: (form: ManagementForm) => void;
   manage: (input: ManagementInput) => void; blocked: boolean;
@@ -200,9 +217,10 @@ export function Integrations({ sources, agents, busy, open, manage, blocked }: {
     return <section className="panel entity-card" key={source.id}>
       <div className="entity-header">
         <span className="entity-icon accent"><Icon name="link" /></span>
-        <div className="entity-main"><h2>{source.name}</h2><code>{source.id}</code></div>
+        <div className="entity-main"><h2>{source.name}</h2></div>
         <Badge tone={source.revoked ? 'neutral' : 'success'}>{source.revoked ? 'Доступ отозван' : 'Активен'}</Badge>
       </div>
+      <CopyId label="Source ID" value={source.id} />
       {!source.revoked && <>
         {source.canEditPermissions && <div className="entity-controls">
           <div><strong>Права источника</strong><p>{source.scopes.map(scope => sourcePermissionLabels[scope] ?? scope).join(', ') || 'Права не выданы'}</p></div>
@@ -223,6 +241,7 @@ export function Integrations({ sources, agents, busy, open, manage, blocked }: {
             </Badge>}
           </div>
           {agent ? <>
+            <CopyId label="Agent ID" value={agent.id} />
             {!agent.online && !!agent.lastSeenAt && <p>Последнее подключение {dateTime.format(agent.lastSeenAt)}</p>}
             {agent.capabilities.length > 0 && <div className="tags">{agent.capabilities.map(cap => <Badge key={cap}>{capabilities[cap] ?? cap}</Badge>)}</div>}
             {agent.online && agent.sessions.length > 0 && <p>Задачи · {agent.sessions.map(session => session.name).join(', ')}</p>}
@@ -263,6 +282,18 @@ export function Devices({ devices, busy, open, blocked }: {
 export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agents: Agent[]; sources: Source[]; blocked: boolean }) {
   const [transcripts, setTranscripts] = useState<Record<string, { turns: { id: string; speaker: string; text: string; status?: string; error?: string }[]; partial: boolean; error?: string }>>({});
   const [transcriptErrors, setTranscriptErrors] = useState<Record<string, string>>({});
+  const [traces, setTraces] = useState<Record<string, CallTrace | 'missing' | 'loading' | 'failed'>>({});
+  const loadTrace = async (id: string) => {
+    if (traces[id] === 'loading') return;
+    setTraces(current => ({ ...current, [id]: 'loading' }));
+    try {
+      const response = await fetch(`/api/v1/calls/${id}/trace`, { credentials: 'same-origin' });
+      const value = response.status === 404 ? 'missing' : response.ok ? await response.json() as CallTrace : 'failed';
+      setTraces(current => ({ ...current, [id]: value }));
+    } catch {
+      setTraces(current => ({ ...current, [id]: 'failed' }));
+    }
+  };
   const loadTranscript = async (id: string) => {
     if (transcripts[id] !== undefined || transcriptErrors[id] !== undefined) return;
     try {
@@ -291,6 +322,7 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
       const duration = seconds < 60 ? seconds + ' с' : Math.floor(seconds / 60) + ' мин ' + seconds % 60 + ' с';
       const transcript = transcripts[call.id];
       const transcriptError = transcriptErrors[call.id];
+      const trace = traces[call.id];
       return <li key={call.id}>
         <span className="entity-icon accent"><Icon name="call" /></span>
         <div className="call-party"><strong>{peer}</strong><p>{direction} · {dateTime.format(call.startedAt)}</p></div>
@@ -300,8 +332,15 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
             {transcript === undefined && transcriptError === undefined && <p>Загружаем…</p>}
             {transcriptError !== undefined && <p>Не удалось загрузить: {transcriptError}</p>}
             {transcript?.partial === true && <p>Распознано неполно; полученные реплики сохранены.</p>}
-            {transcript?.turns.map(turn => <p key={turn.id}><strong>{turn.speaker === 'user' ? 'Вы' : 'Агент'}:</strong> {turn.status === 'error' ? `ошибка распознавания (${turn.error ?? 'unknown'})` : turn.text}</p>)}
+            {transcript?.turns.map(turn => <p key={turn.id}><strong>{turn.speaker === 'user' ? 'Вы' : 'Агент'}:</strong> {turn.text} {turn.status === 'error' ? `(${turn.error ?? 'Ошибка'})` : ''}</p>)}
           </details>}
+          <details onToggle={event => { if (event.currentTarget.open) void loadTrace(call.id); }}>
+            <summary>Таймлайн и этапы</summary>
+            {(trace === undefined || trace === 'loading') && <p>Загружаем…</p>}
+            {trace === 'missing' && <p>Нет данных об этапах.</p>}
+            {trace === 'failed' && <p>Не удалось загрузить этапы.</p>}
+            {typeof trace === 'object' && <CallTraceView trace={trace} />}
+          </details>
         </div>
         <Badge tone={call.securityLevel === 'elevated' ? 'info' : 'neutral'}>
           {call.securityLevel === 'elevated' && <Icon name="shield" size={14} />}
@@ -309,6 +348,31 @@ export function Calls({ calls, agents, sources, blocked }: { calls: Call[]; agen
         </Badge>
       </li>;
     })}</ul>}
+  </>;
+}
+
+function CallTraceView({ trace }: { trace: CallTrace }) {
+  if (!trace.events.length) return <p>Нет данных об этапах.</p>;
+  const end = Math.max(1, ...trace.events.map(event => event.offsetMs));
+  return <>
+    {trace.truncated && <p>Достигнут предел записи событий.</p>}
+    <div className="call-trace-scale" aria-label="Временные отметки звонка">
+      {trace.events.map(event => <span key={event.sequence} title={`${event.stage} · +${Math.round(event.offsetMs)} мс`}
+        style={{ left: `${event.offsetMs / end * 100}%`, top: event.source === 'asterisk' ? 2 : event.source === 'agent' ? 12 : 22 }}
+        className={event.status === 'failed' ? 'call-trace-failure' : undefined} />)}
+    </div>
+    <ol className="call-trace-events">{trace.events.map(event => <li key={event.sequence}>
+      <details><summary>{event.stage} · {event.status} · +{Math.round(event.offsetMs)} мс</summary>
+        <p>{event.source} · {event.durationMs == null ? 'Длительность недоступна' : `${Math.round(event.durationMs)} мс`} {event.code ?? ''}</p>
+        {event.turnId && <p>Реплика {event.turnId}</p>}
+        {event.replyId && <p>Ответ {event.replyId}</p>}
+        {event.model && <p>Модель {event.model}</p>}
+        {event.agentThreadId && <p>Чат Codex {event.agentThreadId}</p>}
+        {(event.frames != null || event.receivedFrames != null || event.droppedFrames != null) && <p>
+          Кадры · отправлено {event.frames ?? '—'} · принято {event.receivedFrames ?? '—'} · отклонено {event.droppedFrames ?? '—'}</p>}
+        {event.tokens != null && <p>Токены · {event.tokens}</p>}
+      </details>
+    </li>)}</ol>
   </>;
 }
 

@@ -511,6 +511,7 @@ public sealed class NotificationService(Database db, IDataProtectionProvider pro
             Exec(c, t, "DELETE FROM objects WHERE kind='callchallenge' AND CAST(json_extract(data,'$.expiresAt') AS INTEGER)<$n", ("$n", Wire.Now - 3600000));
             Exec(c, t, "DELETE FROM objects WHERE kind='call' AND CAST(json_extract(data,'$.startedAt') AS INTEGER)<$n", ("$n", cutoff));
             Exec(c, t, "DELETE FROM objects WHERE kind='calltranscript' AND CAST(json_extract(data,'$.updatedAt') AS INTEGER)<$n", ("$n", cutoff));
+            Exec(c, t, "DELETE FROM objects WHERE kind='calltrace' AND CAST(json_extract(data,'$.updatedAt') AS INTEGER)<$n", ("$n", cutoff));
             Exec(c, t, "DELETE FROM objects WHERE kind='voicemessage' AND CAST(json_extract(data,'$.expiresAt') AS INTEGER)<$n", ("$n", Wire.Now));
             Exec(c, t, "DELETE FROM objects WHERE kind='delivery' AND json_extract(data,'$.notificationId') NOT IN (SELECT id FROM notifications)");
             Exec(c, t, "DELETE FROM objects WHERE kind='chatgpt_voice' AND CAST(json_extract(data,'$.createdAt') AS INTEGER)<$n", ("$n", cutoff - 86400000L));
