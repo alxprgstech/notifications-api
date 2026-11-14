@@ -1,4 +1,5 @@
 .git
+AGENTS.override.md
 .tools
 .cache
 artifacts
@@ -10,5 +11,9 @@ data
 **/.venv
 **/__pycache__
 .env
+home.env
+sso-web.json
+owner-sub.txt
+firebase-service-account*.json
 **/*.pem
 **/service-account*.json
