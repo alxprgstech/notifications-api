@@ -120,6 +120,7 @@ class Ari:
                     if self.trusted_incoming(event) and not self.incoming.full():
                         self.incoming.put_nowait(channel_id)
                     else:
+                        print("Phone assistant SIP invite rejected by bridge routing policy", flush=True)
                         with suppress(aiohttp.ClientError, TimeoutError):
                             await self.request("DELETE", "channels/" + channel_id)
                 elif self.events is not None:
@@ -340,8 +341,13 @@ async def session_loop(session, ari, origin, headers, endpoint):
                     invite = await asyncio.wait_for(ack, 8)
                     if invite.get("ok") is True:
                         await run_call(ari, session, origin, headers, control, invite, endpoint, inbound=channel)
-                except (aiohttp.ClientError, TimeoutError, ValueError, KeyError):
-                    pass
+                    else:
+                        code = invite.get("code")
+                        if not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,40}", code):
+                            code = "unknown"
+                        print(f"Phone assistant SIP request {request_id} rejected: {code}", flush=True)
+                except (aiohttp.ClientError, TimeoutError, ValueError, KeyError) as error:
+                    print(f"Phone assistant SIP request {request_id} failed: {type(error).__name__}", flush=True)
                 finally:
                     with suppress(aiohttp.ClientError, TimeoutError):
                         await ari.request("DELETE", "channels/" + channel)

@@ -217,6 +217,8 @@ public sealed partial class CallService
         catch (Exception error) when (error is Fault or TimeoutException or OperationCanceledException)
         {
             var code = error is Fault fault ? fault.Code : "asterisk_unavailable";
+            log.LogInformation("Phone assistant SIP request {RequestId} rejected: {Code}, call={CallId}",
+                requestId, code, call?.Id);
             if (call != null) await EndAsync(call, code);
             if (!ct.IsCancellationRequested)
                 await peer.SendAsync(new { type = "incoming_ack", requestId, ok = false, code });
