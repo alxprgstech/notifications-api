@@ -4,6 +4,7 @@
 **/dist/
 **/__pycache__/
 **/*.egg-info/
+/packages/python-sdk/build/
 **/.pytest_cache/
 **/.venv/
 **/TestResults/
