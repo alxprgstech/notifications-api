@@ -69,11 +69,21 @@ async def call(samples, host, number, require_ringback=False):
             await signal("BYE", contact)
             raise RuntimeError("SIP 180 Ringing was not received before 200 OK")
 
+        ready_at = None
+        listen_after = None
         async def listen():
+            nonlocal ready_at
             while True:
-                packet, _ = await loop.sock_recvfrom(rtp, 2048)
-                if len(packet) >= 172 and audioop.rms(audioop.ulaw2lin(packet[12:], 2), 2) > 450:
-                    return time.monotonic()
+                packet, address = await loop.sock_recvfrom(rtp, 2048)
+                if address != (host, port) or len(packet) != 172 or packet[0] != 0x80 or packet[1] & 0x7f:
+                    continue
+                if audioop.rms(audioop.ulaw2lin(packet[12:], 2), 2) <= 450:
+                    continue
+                now = time.monotonic()
+                if ready_at is None:
+                    ready_at = now
+                elif listen_after is not None and now >= listen_after:
+                    return now
 
         heard = asyncio.create_task(listen())
         try:
@@ -82,19 +92,37 @@ async def call(samples, host, number, require_ringback=False):
             ssrc = secrets.randbits(32)
             tick = loop.time()
             last_voice = None
-            for pcm in samples + [bytes(320)] * 2750:
+            silence = bytes(320)
+
+            async def send_audio(pcm):
+                nonlocal seq, ts, tick
                 payload = audioop.lin2ulaw(pcm, 2)
                 await loop.sock_sendto(rtp, struct.pack("!BBHII", 128, 0, seq, ts, ssrc) + payload, (host, port))
-                if audioop.rms(pcm, 2) > 480:
-                    last_voice = time.monotonic()
                 seq = (seq + 1) & 65535
                 ts = (ts + 160) & 4294967295
+                tick += .02
+                await asyncio.sleep(max(0, tick - loop.time()))
+
+            # Send silence to establish RTP and let the 180 ms readiness tone finish.
+            async with asyncio.timeout(10):
+                while ready_at is None or time.monotonic() - ready_at < .3:
+                    await send_audio(silence)
+            last_voice_index = next((index for index in range(len(samples) - 1, -1, -1)
+                                     if audioop.rms(samples[index], 2) > 480), None)
+            if last_voice_index is None:
+                raise RuntimeError("The test utterance contains no audible speech")
+            for index, pcm in enumerate(samples):
+                if index == last_voice_index:
+                    last_voice = time.monotonic()
+                    listen_after = last_voice
+                await send_audio(pcm)
+            for _ in range(2750):
+                await send_audio(silence)
                 if heard.done():
                     return {"sipAnswerMs": round(answer_ms, 2),
                             "sipRingingMs": None if ringing_ms is None else round(ringing_ms, 2),
+                            "sipAnswerToReadyRtpMs": round((ready_at - before) * 1000 - answer_ms, 2),
                             "lastVoiceToFirstNonSilentRtpMs": round((heard.result() - last_voice) * 1000, 2)}
-                tick += .02
-                await asyncio.sleep(max(0, tick - loop.time()))
             raise TimeoutError("No non-silent RTP reply")
         finally:
             heard.cancel()
