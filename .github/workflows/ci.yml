@@ -31,7 +31,51 @@ jobs:
       - run: npx playwright install --with-deps chromium && npm run test:ui
         working-directory: web
       - run: python -m build packages/python-sdk --outdir artifacts/sdk
-      - run: docker build -t alxprgs-notify:local .
+      - name: Build Notify server image
+        run: docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" -t alxprgs-notify:local .
+      - name: Package the verified server image
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          image_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$image_dir"' EXIT
+          docker image save -o "$image_dir/images.tar" alxprgs-notify:local
+          python - "$image_dir" "$GITHUB_SHA" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+          import tarfile
+
+          directory = Path(sys.argv[1])
+          image = directory / "images.tar"
+          with tarfile.open(image) as archive:
+              records = json.load(archive.extractfile("manifest.json"))
+              if len(records) != 1:
+                  raise SystemExit("Expected one app image")
+              config = archive.extractfile(records[0]["Config"]).read()
+          metadata = json.loads(config)
+          assert metadata["os"] == "linux" and metadata["architecture"] == "amd64"
+          assert metadata["config"]["Labels"]["org.opencontainers.image.revision"] == sys.argv[2]
+          with image.open("rb") as source:
+              digest = hashlib.file_digest(source, "sha256").hexdigest()
+          (directory / "manifest.json").write_text(json.dumps({
+              "format": 1,
+              "sha": sys.argv[2],
+              "image": "sha256:" + hashlib.sha256(config).hexdigest(),
+              "files": {"images.tar": digest},
+          }, indent=2) + "\n")
+          PY
+          tar -czf notify-server.tar.gz -C "$image_dir" manifest.json images.tar
+      - name: Save the immutable Notify server transport
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: notify-server-${{ github.run_id }}-${{ github.run_attempt }}
+          path: notify-server.tar.gz
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: notify-sdk-and-tests
