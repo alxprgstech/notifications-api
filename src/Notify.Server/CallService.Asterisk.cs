@@ -32,6 +32,7 @@ public sealed partial class CallService
         public string SourceId { get; } = sourceId;
         public WebSocket Socket { get; } = socket;
         private readonly SemaphoreSlim send = new(1, 1);
+        public readonly Dictionary<string, (string? Extension, object Reply)> IncomingReplies = new();
 
         public async Task<bool> SendAsync(object message)
         {
@@ -126,6 +127,11 @@ public sealed partial class CallService
                     var requestId = frame.GetProperty("requestId").GetString();
                     var extension = frame.GetProperty("extension").GetString();
                     if (requestId is not { Length: 32 } || !requestId.All(char.IsAsciiHexDigitLower)) break;
+                    if (peer.IncomingReplies.TryGetValue(requestId, out var previous))
+                    {
+                        if (extension != previous.Extension || !await peer.SendAsync(previous.Reply)) break;
+                        continue;
+                    }
                     await HandleSipIncomingAsync(peer, requestId, extension, ct);
                     continue;
                 }
@@ -171,15 +177,16 @@ public sealed partial class CallService
     internal PhoneAssistantRouteResponse PhoneAssistantRoute(Actor actor)
     {
         actor.RequireScope("agents:connect");
-        if (settings.PhoneAssistantExtension.Length == 0 ||
-            agents.ForSource(actor.Id)?.Id != settings.PhoneAssistantAgentId)
+        var agentId = agents.ForSource(actor.Id)?.Id;
+        var route = settings.GetPhoneAssistantRoutes().FirstOrDefault(route => route.AgentId == agentId);
+        if (route == null)
             throw new Fault(404, "phone_assistant_not_configured");
         bool bridgeOnline;
         lock (sync) bridgeOnline = sipPeer?.SourceId == settings.PhoneAssistantBridgeSourceId;
-        var online = agents.Online(settings.PhoneAssistantAgentId);
+        var online = agents.Online(route.AgentId);
         var sessionReady = online is { } live && live.CallProtocol == Protocol &&
             live.Capabilities.Contains("realtime_audio") && live.Sessions.Any(session => session.Id == PhoneAssistantSession);
-        return new(settings.PhoneAssistantExtension, bridgeOnline, online.HasValue, sessionReady);
+        return new(route.Extension, bridgeOnline, online.HasValue, sessionReady);
     }
 
     private async Task HandleSipIncomingAsync(SipPeer peer, string requestId, string? extension, CancellationToken ct)
@@ -187,15 +194,15 @@ public sealed partial class CallService
         Call? call = null;
         try
         {
-            if (settings.PhoneAssistantExtension.Length == 0 || extension != settings.PhoneAssistantExtension ||
-                peer.SourceId != settings.PhoneAssistantBridgeSourceId)
+            var route = settings.GetPhoneAssistantRoutes().FirstOrDefault(route => route.Extension == extension);
+            if (route == null || peer.SourceId != settings.PhoneAssistantBridgeSourceId)
                 throw new Fault(403, "rejected");
             if (!stt.Enabled) throw new Fault(503, "stt_unavailable");
             lock (sync)
             {
                 if (peer != sipPeer || phoneAssistantCallId != null ||
                     (currentId is { } id && calls[id].Sip != null)) throw new Fault(409, "busy");
-                if (agents.Online(settings.PhoneAssistantAgentId) is not { } online ||
+                if (agents.Online(route.AgentId) is not { } online ||
                     online.CallProtocol != Protocol || !online.Capabilities.Contains("realtime_audio") ||
                     !online.Sessions.Any(session => session.Id == PhoneAssistantSession) ||
                     online.Agent.SourceId == peer.SourceId)
@@ -216,7 +223,7 @@ public sealed partial class CallService
                 throw new Fault(409, "agent_offline");
             if (!await call.AgentDecision!.Task.WaitAsync(TimeSpan.FromSeconds(5), ct))
                 throw new Fault(409, "rejected");
-            if (!await peer.SendAsync(new { type = "incoming_ack", requestId, ok = true, callId = call.Id, inviteId = call.InviteId, trace = true }))
+            if (!await ReplyAsync(new { type = "incoming_ack", requestId, ok = true, callId = call.Id, inviteId = call.InviteId, trace = true }))
                 await EndAsync(call, "disconnected");
         }
         catch (Exception error) when (error is Fault or TimeoutException or OperationCanceledException)
@@ -226,7 +233,15 @@ public sealed partial class CallService
                 requestId, code, call?.Id);
             if (call != null) await EndAsync(call, code);
             if (!ct.IsCancellationRequested)
-                await peer.SendAsync(new { type = "incoming_ack", requestId, ok = false, code });
+                await ReplyAsync(new { type = "incoming_ack", requestId, ok = false, code });
+        }
+
+        Task<bool> ReplyAsync(object reply)
+        {
+            if (peer.IncomingReplies.Count >= 128)
+                peer.IncomingReplies.Remove(peer.IncomingReplies.Keys.First());
+            peer.IncomingReplies.Add(requestId, (extension, reply));
+            return peer.SendAsync(reply);
         }
     }
 

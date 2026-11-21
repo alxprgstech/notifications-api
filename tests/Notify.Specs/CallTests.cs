@@ -65,7 +65,7 @@ public sealed class FakeMediaSocket : WebSocket
     }
 }
 
-public sealed class CallTests
+public sealed partial class CallTests
 {
     private static WebSocketClient Ws(AppFactory app, string token) { var client = app.Server.CreateWebSocketClient(); client.ConfigureRequest = request => request.Headers.Authorization = "Bearer " + token; return client; }
     private static string Token(HttpClient client) => client.DefaultRequestHeaders.Authorization!.Parameter!;
@@ -580,6 +580,89 @@ public sealed class CallTests
             await WaitStatus(phoneClient, callId, "ended");
             using var ended = JsonDocument.Parse(await phoneClient.GetStringAsync("/api/v1/calls/" + callId)); Assert.Equal("rejected", ended.RootElement.GetProperty("reason").GetString());
             using var controlEnded = JsonDocument.Parse(Wire.Encode(await ReceiveJson(control))); Assert.Equal("call.ended", controlEnded.RootElement.GetProperty("type").GetString()); Assert.Equal("rejected", controlEnded.RootElement.GetProperty("payload").GetProperty("reason").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task OnlyTheOriginatingSourceCanCancelAnAnnouncement()
+    {
+        using var app = new AppFactory { UseSpeechStub = true };
+        var (origin, _) = app.Integration(scopes: ["calls:announce"]);
+        var (other, _) = app.Integration(scopes: ["calls:announce"]);
+        var (unscoped, _) = app.Integration();
+        using (origin) using (other) using (unscoped)
+        {
+            using var started = await origin.PostAsJsonAsync("/api/v1/calls/announce",
+                new { title = "Синтетический вызов", text = "Проверка", idempotencyKey = Wire.Id() });
+            started.EnsureSuccessStatusCode();
+            var callId = (await started.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("id").GetString();
+            var path = $"/api/v1/calls/{callId}/cancel-announcement";
+            Assert.Equal(HttpStatusCode.NotFound, (await other.PostAsync(path, null)).StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, (await unscoped.PostAsync(path, null)).StatusCode);
+            Assert.Equal(HttpStatusCode.NoContent, (await origin.PostAsync(path, null)).StatusCode);
+            await WaitStatus(origin, callId!, "ended");
+        }
+    }
+
+    [Fact]
+    public async Task SipExtensionsResolveOnlyTheirOwnAgent()
+    {
+        var bridgeId = Wire.Id();
+        var codexId = Wire.Id();
+        var deepSeekId = Wire.Id();
+        using var app = new AppFactory
+        {
+            UseSpeechStub = true,
+            PhoneAssistantBridgeSourceId = bridgeId,
+            PhoneAssistantRoutes = [new("8260", codexId), new("8261", deepSeekId)]
+        };
+        var (bridgeHttp, _) = app.Integration(bridgeId, ["telephony:bridge"]);
+        var (codexHttp, codex) = app.Integration(scopes: ["agents:connect"]);
+        var (deepSeekHttp, deepSeek) = app.Integration(scopes: ["agents:connect"]);
+        using var resources = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using (bridgeHttp) using (codexHttp) using (deepSeekHttp)
+        {
+            var agent1 = new Agent(codexId, codex.Id, "Codex fixture", ["realtime_audio"], Wire.Now);
+            var agent2 = new Agent(deepSeekId, deepSeek.Id, "DeepSeek fixture", ["realtime_audio"], Wire.Now);
+            app.Services.GetRequiredService<Database>().Run((c, t) =>
+            {
+                Put(c, t, "agent", codexId, agent1);
+                Put(c, t, "agent", deepSeekId, agent2);
+                return 0;
+            });
+            using var bridge = await Ws(app, Token(bridgeHttp)).ConnectAsync(
+                new Uri("ws://localhost/api/v1/telephony/connect"), resources.Token);
+            using var codexControl = await ConnectAgentSessions(app, Token(codexHttp), agent1, ["notify-phone-assistant"]);
+            Assert.Equal("8260", (await codexHttp.GetFromJsonAsync<PhoneAssistantRouteResponse>("/api/v1/telephony/assistant"))!.Extension);
+            Assert.Equal("8261", (await deepSeekHttp.GetFromJsonAsync<PhoneAssistantRouteResponse>("/api/v1/telephony/assistant"))!.Extension);
+
+            await SendText(bridge, new { type = "incoming", requestId = Wire.Id(), extension = "8261" });
+            Assert.Equal("agent_offline", (await ReceiveJson(bridge)).GetProperty("code").GetString());
+            using var deepSeekControl = await ConnectAgentSessions(app, Token(deepSeekHttp), agent2, ["notify-phone-assistant"]);
+            foreach (var (extension, source, socket) in new[] { ("8260", codex.Id, codexControl), ("8261", deepSeek.Id, deepSeekControl) })
+            {
+                var requestId = Wire.Id();
+                await SendText(bridge, new { type = "incoming", requestId, extension });
+                var invite = (await ReceiveJson(socket)).GetProperty("payload");
+                Assert.Equal(source, invite.GetProperty("sourceId").GetString());
+                Assert.Equal(extension, invite.GetProperty("extension").GetString());
+                var callId = invite.GetProperty("callId").GetString();
+                await SendText(socket, new { type = "call.reject", protocolVersion = CallService.Protocol, eventId = Wire.Id(), payload = new { callId } });
+                Assert.Equal("call.ended", (await ReceiveJson(socket)).GetProperty("type").GetString());
+                JsonElement result;
+                do { result = await ReceiveJson(bridge); }
+                while (result.GetProperty("type").GetString() == "end");
+                Assert.Equal(requestId, result.GetProperty("requestId").GetString());
+                Assert.False(result.GetProperty("ok").GetBoolean());
+                await SendText(bridge, new { type = "incoming", requestId, extension });
+                JsonElement replay;
+                do { replay = await ReceiveJson(bridge); }
+                while (replay.GetProperty("type").GetString() == "end");
+                Assert.Equal(result.GetRawText(), replay.GetRawText());
+            }
+            await codexControl.CloseAsync(WebSocketCloseStatus.NormalClosure, "", resources.Token);
+            await deepSeekControl.CloseAsync(WebSocketCloseStatus.NormalClosure, "", resources.Token);
+            await bridge.CloseAsync(WebSocketCloseStatus.NormalClosure, "", resources.Token);
         }
     }
 

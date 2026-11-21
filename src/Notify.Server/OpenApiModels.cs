@@ -35,7 +35,7 @@ public sealed record CallViewResponse(string Id, string InviteId, string Directi
     string Title, string? IconId, string Mode, bool HasTranscript, long ExpiresAt, string Target = "android");
 public sealed record CallTranscriptResponse(string CallId, IReadOnlyList<CallTurn> Turns, bool Partial, string? Error, long UpdatedAt);
 public sealed record AgentViewResponse(string Id, string SourceId, string Name, string[] Capabilities, string[] CallProtocols, string? CallProtocol,
-    bool Revoked, bool Online, long? LastSeenAt, AgentSession[] Sessions);
+    bool Revoked, bool Online, long? LastSeenAt, AgentSession[] Sessions, string? PhoneAssistantExtension = null);
 public sealed record SourceViewResponse(string Id, string Name, string[] Scopes, string Preview, string? IconId, string? WebhookUrl, bool Revoked, long PermissionsRevision, bool CanEditPermissions);
 public sealed record ManagementStatusResponse(string Id, string Status, JsonElement? Result = null);
 public sealed record IconResponse(string Id);
