@@ -718,6 +718,16 @@ internal static class OpenApiDocs
                 RateLimited, InternalError],
             Parameters: new() { ["id"] = "Id звонка." }));
 
+        Add("POST", "/api/v1/calls/{id}/cancel-announcement", new("cancelCallAnnouncement", "Звонки", "Отменить звонок с озвучкой",
+            "Завершает активный звонок с озвучкой, созданный этим источником. Требуется право запуска звонков с озвучкой.",
+            ApiAuth.Bearer, [
+                NoContent("Звонок завершён."),
+                Unauthorized,
+                Error(403, "Недостаточно прав (`insufficient_scope`).", """{"code":"insufficient_scope"}"""),
+                Error(404, "Активный звонок источника не найден (`call_not_found`).", """{"code":"call_not_found"}"""),
+                RateLimited, InternalError],
+            Parameters: new() { ["id"] = "Id звонка." }));
+
         // ---- responses / deliveries ----
         Add("POST", "/api/v1/notifications/{id}/response", new("submitResponse", "Решения", "Отправить окончательный ответ",
             "Только доверенное устройство. Один окончательный ответ: `pending → answered`; повтор и ответ на expired/cancelled — 409. Для `confirmation` передайте `answer` (`yes|no|custom`, текст ≤ 4 000); для `form` — `form.values`. Для elevated обязательны `challengeId` и `signature` точных серверных байтов; подпись проверяется до сохранения. Только `answered + yes` разрешает описанное действие; `no`, `pending`, `expired`, `cancelled` — не согласие.",

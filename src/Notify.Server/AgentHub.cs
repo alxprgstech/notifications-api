@@ -75,7 +75,16 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         return db.Run((c, t) => All<Agent>(c, t, "agent").Select(agent =>
         {
             var live = !agent.Revoked ? FindOnline(agent.Id) : null;
-            return (object)new { agent.Id, agent.SourceId, agent.Name, agent.Capabilities, CallProtocols = live?.CallProtocols ?? agent.CallProtocols ?? [], CallProtocol = live?.CallProtocol ?? agent.CallProtocol, agent.Revoked, online = live != null, lastSeenAt = agent.LastSeenAt, sessions = live?.Sessions ?? Array.Empty<AgentSession>() };
+            var assistant = agent.Revoked ? null : settings.GetPhoneAssistantRoutes().FirstOrDefault(route => route.AgentId == agent.Id);
+            return (object)new
+            {
+                agent.Id, agent.SourceId, agent.Name, agent.Capabilities,
+                CallProtocols = live?.CallProtocols ?? agent.CallProtocols ?? [],
+                CallProtocol = live?.CallProtocol ?? agent.CallProtocol,
+                agent.Revoked, online = live != null, lastSeenAt = agent.LastSeenAt,
+                sessions = live?.Sessions ?? Array.Empty<AgentSession>(),
+                phoneAssistantExtension = assistant?.Extension
+            };
         }).ToList());
     }
 
@@ -358,7 +367,11 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
             if (item.ValueKind != JsonValueKind.Object) throw new AgentProtocolException("invalid_sessions");
             var id = Text(item, "id", 64); var label = Text(item, "name", 160);
             if (label.Any(char.IsControl) || !seen.Add(id)) throw new AgentProtocolException("invalid_sessions");
-            return new AgentSession(id, label);
+            bool? busy = item.TryGetProperty("busy", out var state) &&
+                state.ValueKind is JsonValueKind.True or JsonValueKind.False ? state.GetBoolean() : null;
+            bool? conversationOnly = item.TryGetProperty("conversationOnly", out var modes) &&
+                modes.ValueKind is JsonValueKind.True or JsonValueKind.False ? modes.GetBoolean() : null;
+            return new AgentSession(id, label, busy, conversationOnly);
         }).ToArray();
     }
     private static bool Id(string value) => value.Length is >= 1 and <= 64 && char.IsAsciiLetterOrDigit(value[0]) && value.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' or '.');

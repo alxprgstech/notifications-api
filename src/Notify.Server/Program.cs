@@ -219,6 +219,11 @@ api.MapPost("/calls/{id}/challenge", (string id, HttpContext c, CallService call
 api.MapPost("/calls/{id}/accept", async (string id, CallAcceptInput input, HttpContext c, CallService calls) => await calls.AcceptAsync(Auth.Actor(c), id, input));
 api.MapPost("/calls/{id}/reject", async (string id, HttpContext c, CallService calls) => { await calls.RejectAsync(Auth.Actor(c), id); return Results.NoContent(); });
 api.MapPost("/calls/{id}/end", async (string id, HttpContext c, CallService calls) => { await calls.EndByDeviceAsync(Auth.Actor(c), id); return Results.NoContent(); });
+api.MapPost("/calls/{id}/cancel-announcement", async (string id, HttpContext c, CallService calls) =>
+{
+    await calls.CancelAnnouncementAsync(Auth.Actor(c), id);
+    return Results.NoContent();
+});
 api.Map("/calls/{id}/audio", async (string id, HttpContext c, CallService calls, CancellationToken ct) =>
 {
     var actor = Auth.Actor(c); calls.RequirePhone(actor, id);

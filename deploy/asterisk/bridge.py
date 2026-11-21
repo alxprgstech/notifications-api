@@ -93,7 +93,7 @@ class Ari:
         self.app = app
         self.events = None
         self.ready = asyncio.Event()
-        self.assistant = assistant
+        self.assistant_routes = assistant or {}
         self.incoming = asyncio.Queue(8)
 
     async def request(self, method, path, **params):
@@ -112,13 +112,13 @@ class Ari:
                 if message.type != aiohttp.WSMsgType.TEXT:
                     break
                 event = message.json()
-                if event.get("type") == "StasisStart" and event.get("args", [])[:1] == ["phone-assistant"]:
+                if event.get("type") == "StasisStart" and isinstance(event.get("args"), list) and event["args"][:1] == ["phone-assistant"]:
                     channel = event.get("channel", {})
                     channel_id = channel.get("id", "")
                     if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", channel_id):
                         continue
                     if self.trusted_incoming(event) and not self.incoming.full():
-                        self.incoming.put_nowait(channel_id)
+                        self.incoming.put_nowait((channel_id, event["args"][1]))
                     else:
                         print("Phone assistant SIP invite rejected by bridge routing policy", flush=True)
                         with suppress(aiohttp.ClientError, TimeoutError):
@@ -130,12 +130,14 @@ class Ari:
                         return
 
     def trusted_incoming(self, event):
-        if self.assistant is None:
+        args = event.get("args", [])
+        if (not isinstance(args, list) or len(args) != 2 or args[0] != "phone-assistant"
+                or not isinstance(args[1], str) or args[1] not in self.assistant_routes):
             return False
-        extension, context, endpoint = self.assistant
+        extension = args[1]
+        context, endpoint = self.assistant_routes[extension]
         channel = event["channel"]
-        return (event["args"] == ["phone-assistant", extension]
-                and channel.get("state") != "Up"
+        return (channel.get("state") != "Up"
                 and channel.get("dialplan", {}).get("context") == context
                 and channel.get("dialplan", {}).get("exten") == extension
                 and re.fullmatch(re.escape(endpoint) + r"-[0-9a-fA-F]+", channel.get("name", "")) is not None)
@@ -361,11 +363,11 @@ async def session_loop(session, ari, origin, headers, endpoint):
             ari_events.result()
             return
         async with session.ws_connect(origin + "/api/v1/telephony/connect", headers=headers, heartbeat=10) as control:
-            async def incoming_call(channel, request_id, ack):
+            async def incoming_call(channel, extension, request_id, ack):
                 try:
                     # Send SIP alerting before waiting for the agent. No media is sent until answer.
                     await ari.request("POST", f"channels/{channel}/ring")
-                    await control.send_json({"type": "incoming", "requestId": request_id, "extension": ari.assistant[0]})
+                    await control.send_json({"type": "incoming", "requestId": request_id, "extension": extension})
                     invite = await asyncio.wait_for(ack, 8)
                     if invite.get("ok") is True:
                         await run_call(ari, session, origin, headers, control, invite, endpoint, inbound=channel)
@@ -383,7 +385,7 @@ async def session_loop(session, ari, origin, headers, endpoint):
             async def read_incoming():
                 nonlocal call, call_id, pending
                 while True:
-                    channel = await ari.incoming.get()
+                    channel, extension = await ari.incoming.get()
                     if call is not None and not call.done():
                         with suppress(aiohttp.ClientError, TimeoutError):
                             await ari.request("DELETE", "channels/" + channel, reason="busy")
@@ -392,7 +394,7 @@ async def session_loop(session, ari, origin, headers, endpoint):
                     request_id = secrets.token_hex(16)
                     ack = asyncio.get_running_loop().create_future()
                     pending = (request_id, ack)
-                    call = asyncio.create_task(incoming_call(channel, request_id, ack))
+                    call = asyncio.create_task(incoming_call(channel, extension, request_id, ack))
 
             async def heartbeat():
                 while not ari_events.done():
@@ -434,8 +436,22 @@ async def session_loop(session, ari, origin, headers, endpoint):
         ari_events.cancel()
         await asyncio.gather(ari_events, return_exceptions=True)
         while not ari.incoming.empty():
+            channel, _ = ari.incoming.get_nowait()
             with suppress(aiohttp.ClientError, TimeoutError):
-                await ari.request("DELETE", "channels/" + ari.incoming.get_nowait())
+                await ari.request("DELETE", "channels/" + channel)
+
+
+def assistant_routes(legacy_extension, additional_extensions, context, endpoint):
+    extensions = additional_extensions.split(",") if additional_extensions else []
+    if legacy_extension:
+        extensions.append(legacy_extension)
+    if not extensions and not context:
+        return {}
+    if (not extensions or len(set(extensions)) != len(extensions)
+            or not all(re.fullmatch(r"[0-9]{2,8}", number) for number in extensions)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", context)):
+        raise ValueError("invalid phone assistant dialplan configuration")
+    return {extension: (context, endpoint) for extension in extensions}
 
 
 async def main():
@@ -446,13 +462,9 @@ async def main():
             or parts.query or parts.fragment or not re.fullmatch(r"PJSIP/[A-Za-z0-9_.-]+", endpoint)):
         raise ValueError("invalid Notify origin or PJSIP endpoint")
     headers = {"Authorization": "Bearer " + os.environ["NOTIFY_BRIDGE_TOKEN"]}
-    extension = os.environ.get("ASTERISK_ASSISTANT_EXTENSION", "")
-    context = os.environ.get("ASTERISK_ASSISTANT_CONTEXT", "")
-    assistant = None
-    if extension or context:
-        if not re.fullmatch(r"[0-9]{2,8}", extension) or not re.fullmatch(r"[A-Za-z0-9_.-]+", context):
-            raise ValueError("invalid phone assistant dialplan configuration")
-        assistant = (extension, context, endpoint)
+    assistant = assistant_routes(os.environ.get("ASTERISK_ASSISTANT_EXTENSION", ""),
+                                 os.environ.get("ASTERISK_ASSISTANT_ADDITIONAL_EXTENSIONS", ""),
+                                 os.environ.get("ASTERISK_ASSISTANT_CONTEXT", ""), endpoint)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
         while True:
             try:

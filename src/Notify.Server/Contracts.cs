@@ -43,7 +43,7 @@ public sealed record EnrollDevice(string Name, string PublicKey, string? FcmToke
 public sealed record Enrollment(string Id, EnrollDevice Device, string Owner, long ExpiresAt, string? ProtectedToken = null, bool Completed = false);
 public sealed record StepUpState(string Id, string Kind, string TargetId, string Owner, string PayloadHash, string State, string Nonce, string Verifier, long ExpiresAt);
 public sealed record Agent(string Id, string SourceId, string Name, string[] Capabilities, long CreatedAt, long? LastSeenAt = null, bool Revoked = false, string[]? CallProtocols = null, string? CallProtocol = null);
-public sealed record AgentSession(string Id, string Name);
+public sealed record AgentSession(string Id, string Name, bool? Busy = null, bool? ConversationOnly = null);
 public sealed record CallStart(string SourceId, string? SessionId = null, string SecurityLevel = "standard", string? ChallengeId = null, string? Signature = null, string Mode = "one_shot");
 public sealed record CallPlaybackInput(string IdempotencyKey, string Title, string Text, string? IconId = null, string Target = "android");
 public sealed record CallConversationInput(string IdempotencyKey, string Title, string Target = "android", string? SessionId = null);
@@ -72,6 +72,8 @@ public sealed class Fault(int status, string code) : Exception(code)
     public int Status { get; } = status;
     public string Code { get; } = code;
 }
+public sealed record PhoneAssistantDestination(string Extension, string AgentId);
+
 public sealed class Settings
 {
     public string DataPath { get; init; } = "data";
@@ -105,6 +107,7 @@ public sealed class Settings
     public string PhoneAssistantExtension { get; init; } = "";
     public string PhoneAssistantBridgeSourceId { get; init; } = "";
     public string PhoneAssistantAgentId { get; init; } = "";
+    public PhoneAssistantDestination[] PhoneAssistantRoutes { get; init; } = [];
     public bool PhoneAssistantTiming { get; init; }
     public bool SsoConfigured => Guid.TryParse(OwnerSub, out _) && WebClientSecret.Length >= 16;
     public void Validate(bool development)
@@ -124,9 +127,12 @@ public sealed class Settings
         if (AgentHeartbeatSeconds is < 1 or > 60 || AgentOfflineSeconds < AgentHeartbeatSeconds * 2 || AgentOfflineSeconds > 600 || AgentSendTimeoutSeconds is < 1 or > 30) throw new InvalidOperationException("Invalid agent heartbeat/offline limits");
         if (AudioQuotaBytes is < 1L * 1024 * 1024 or > 50L * 1024 * 1024 * 1024 || AudioUploadMinutes is < 1 or > 60 || AudioMessageTtlDays is < 1 or > 30) throw new InvalidOperationException("Invalid audio quota/upload/retention limits");
         if (CallAudioStartDelayMs is < 0 or > 10000) throw new InvalidOperationException("Invalid call audio start delay");
-        if (PhoneAssistantExtension.Length != 0 &&
-            (PhoneAssistantExtension.Length is < 2 or > 8 || !PhoneAssistantExtension.All(char.IsAsciiDigit) ||
-             !ValidPhoneAssistantId(PhoneAssistantBridgeSourceId) || !ValidPhoneAssistantId(PhoneAssistantAgentId)))
+        var assistantRoutes = GetPhoneAssistantRoutes().ToArray();
+        if (assistantRoutes.Length != 0 &&
+            (!ValidPhoneAssistantId(PhoneAssistantBridgeSourceId) ||
+             assistantRoutes.Any(route => route.Extension.Length is < 2 or > 8 ||
+                 !route.Extension.All(char.IsAsciiDigit) || !ValidPhoneAssistantId(route.AgentId)) ||
+             assistantRoutes.Select(route => route.Extension).Distinct(StringComparer.Ordinal).Count() != assistantRoutes.Length))
             throw new InvalidOperationException("The phone assistant requires an extension, a bridge source ID and an agent ID");
         if (CallRingSeconds is < 1 or > 120 || CallMaxMinutes is < 1 or > 120 || CallMediaConnectSeconds is < 1 or > 60 || CallQueueFrames is < 1 or > 200) throw new InvalidOperationException("Invalid call limits");
         if (ConversationUtteranceSeconds is < 3 or > 30 || ConversationSilenceMilliseconds is < 300 or > 2000) throw new InvalidOperationException("Invalid conversation limits");
@@ -134,4 +140,11 @@ public sealed class Settings
     }
 
     private static bool ValidPhoneAssistantId(string id) => id.Length == 32 && id.All(char.IsAsciiHexDigitLower);
+
+    internal IEnumerable<PhoneAssistantDestination> GetPhoneAssistantRoutes()
+    {
+        foreach (var route in PhoneAssistantRoutes) yield return route;
+        if (PhoneAssistantExtension.Length != 0)
+            yield return new(PhoneAssistantExtension, PhoneAssistantAgentId);
+    }
 }

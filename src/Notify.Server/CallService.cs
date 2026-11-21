@@ -476,6 +476,18 @@ public sealed partial class CallService
         if (call == null || call.DeviceId != actor.Id) throw new Fault(404, "call_not_found");
         await EndAsync(call, "ended");
     }
+
+    internal async Task CancelAnnouncementAsync(Actor actor, string id)
+    {
+        if (actor.Kind != "integration" || !actor.Scopes.Any(scope =>
+                scope is ChatGptCall.Scope or ChatGptCall.AnnounceScope or ChatGptCall.AgentScope))
+            throw new Fault(403, "insufficient_scope");
+        Call? call;
+        lock (sync) calls.TryGetValue(id, out call);
+        if (call == null || call.SourceId != actor.Id || call.Mode != "playback")
+            throw new Fault(404, "call_not_found");
+        await EndAsync(call, "ended");
+    }
     public async Task SourceRevokedAsync(string sourceId)
     {
         try
