@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
@@ -24,6 +25,7 @@ if (args.Length == 1 && args[0] == "health")
     catch { Environment.Exit(1); }
     return;
 }
+var apiStartedAt = Stopwatch.GetTimestamp();
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
 builder.Logging.AddFilter("ModelContextProtocol", LogLevel.Warning);
@@ -194,6 +196,11 @@ api.MapPost("/calls/conversation", (CallConversationInput input, HttpContext c, 
 api.MapPost("/calls/{id}/say", (string id, CallSpeakInput input, HttpContext c, ChatGptCall calls) =>
     ChatGptCall.RestAsync(() => Task.FromResult(calls.Speak(Auth.Actor(c), id, input.Text, input.IdempotencyKey))));
 api.MapGet("/telephony/assistant", (HttpContext c, CallService calls) => calls.PhoneAssistantRoute(Auth.Actor(c)));
+api.MapGet("/telephony/infrastructure", (HttpContext c, CallService calls) =>
+{
+    c.Response.Headers.CacheControl = "no-store";
+    return calls.PhoneInfrastructure(Auth.Actor(c), (long)Stopwatch.GetElapsedTime(apiStartedAt).TotalMilliseconds);
+});
 api.Map("/telephony/connect", async (HttpContext c, CallService calls, CancellationToken ct) =>
 {
     var actor = Auth.Actor(c);

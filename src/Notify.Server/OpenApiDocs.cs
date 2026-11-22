@@ -825,6 +825,16 @@ internal static class OpenApiDocs
                 Error(404, "Маршрут не настроен для этого агента.", """{"code":"phone_assistant_not_configured"}"""),
                 RateLimited, InternalError]));
 
+        Add("GET", "/api/v1/telephony/infrastructure", new("getPhoneInfrastructure", "Звонки", "Состояние телефонной инфраструктуры",
+            "Возвращает время измерения в миллисекундах Unix, uptime процесса Notify API и обезличенную готовность настроенных номеров. Доступен источнику с правом `agents:connect`, привязанному к одному из маршрутов.",
+            ApiAuth.Bearer, [
+                Ok<PhoneInfrastructureResponse>("Состояние API, собственного номера и настроенных маршрутов.",
+                    """{"checkedAt":1767225600000,"apiUptimeMs":42000,"uptimeSource":"notify-api-process","ownExtension":"8260","routes":[{"extension":"8260","bridgeOnline":true,"agentOnline":true,"sessionReady":true},{"extension":"8261","bridgeOnline":true,"agentOnline":false,"sessionReady":false}]}"""),
+                Unauthorized,
+                Error(403, "Требуется `agents:connect`.", """{"code":"scope_required"}"""),
+                Error(404, "Собственный маршрут источника отсутствует.", """{"code":"phone_assistant_not_configured"}"""),
+                RateLimited, InternalError]));
+
         Add("GET", "/api/v1/agents/self", new("getSourceAgent", "Управление", "Агент текущего источника",
             "Токен интеграции с правом `agents:connect` определяет источник. Запрос возвращает регистрацию и текущее состояние без открытия WebSocket.",
             ApiAuth.Bearer, [
