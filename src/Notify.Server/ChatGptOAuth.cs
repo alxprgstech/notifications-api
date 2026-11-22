@@ -84,25 +84,30 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
                     .SetTokenEndpointUris("/chatgpt/oauth/token")
                     .SetRevocationEndpointUris("/chatgpt/oauth/revoke")
                     .AllowAuthorizationCodeFlow().AllowRefreshTokenFlow().RequireProofKeyForCodeExchange()
-                    .RegisterScopes(PermissionsForSource).RegisterResources(Resource(settings))
-                    .SetAuthorizationCodeLifetime(TimeSpan.FromMinutes(2))
+                    .RegisterScopes(PermissionsForSource)
+                    .SetAuthorizationCodeLifetime(DesktopOAuth.CodeLifetime)
                     .SetAccessTokenLifetime(TimeSpan.FromMinutes(10))
-                    .SetRefreshTokenLifetime(TimeSpan.FromDays(30))
+                    .SetRefreshTokenLifetime(DesktopOAuth.GrantLifetime)
                     .SetRefreshTokenReuseLeeway(TimeSpan.Zero)
                     .DisableSlidingRefreshTokenExpiration();
                 options.Configure(server => server.CodeChallengeMethods.Remove(CodeChallengeMethods.Plain));
                 options.AddEventHandler<OpenIddictServerEvents.ValidateAuthorizationRequestContext>(handler =>
                     handler.UseInlineHandler(context =>
                     {
-                        if (!HasExactResource(context.Request, Resource(settings)))
+                        var config = context.Transaction.GetHttpRequest()!.HttpContext.RequestServices.GetRequiredService<Settings>();
+                        var expected = DesktopOAuth.IsClient(context.Request.ClientId) ? DesktopOAuth.Resource(config) : Resource(config);
+                        if (!HasExactResource(context.Request, expected))
                             context.Reject(Errors.InvalidTarget);
                         return default;
                     }));
                 options.AddEventHandler<OpenIddictServerEvents.ValidateTokenRequestContext>(handler =>
                     handler.UseInlineHandler(context =>
                     {
-                        if (!(context.Request.IsRefreshTokenGrantType() && context.Request.GetResources().Length == 0) &&
-                            !HasExactResource(context.Request, Resource(settings)))
+                        var config = context.Transaction.GetHttpRequest()!.HttpContext.RequestServices.GetRequiredService<Settings>();
+                        var desktopClient = DesktopOAuth.IsClient(context.Request.ClientId);
+                        var expected = desktopClient ? DesktopOAuth.Resource(config) : Resource(config);
+                        if (!(context.Request.IsRefreshTokenGrantType() && !desktopClient && context.Request.GetResources().Length == 0) &&
+                            !HasExactResource(context.Request, expected))
                             context.Reject(Errors.InvalidTarget);
                         return default;
                     }));
@@ -113,15 +118,28 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
             .AddValidation(options =>
             {
                 options.UseLocalServer();
-                options.AddAudiences(Resource(settings));
                 options.EnableTokenEntryValidation();
                 options.UseAspNetCore();
             });
-        builder.Services.AddOptions<OpenIddictServerOptions>().Configure<ChatGptKeys>((options, keys) =>
+        builder.Services.AddOptions<OpenIddictServerOptions>().Configure<ChatGptKeys, Settings>((options, keys, config) =>
         {
+            options.Issuer = new Uri(config.PublicUrl);
+            options.Resources.Add(new Uri(Resource(config)));
+            if (DesktopOAuth.Configured(config))
+            {
+                options.AuthorizationEndpointUris.Add(new Uri(DesktopOAuth.AuthorizePath, UriKind.Relative));
+                options.TokenEndpointUris.Add(new Uri(DesktopOAuth.TokenPath, UriKind.Relative));
+                options.Scopes.Add(DesktopOAuth.Scope);
+                options.Resources.Add(new Uri(DesktopOAuth.Resource(config)));
+            }
             options.SigningCredentials.Add(new SigningCredentials(keys.Signing, SecurityAlgorithms.RsaSha256));
             options.EncryptionCredentials.Add(new EncryptingCredentials(
                 keys.Encryption, SecurityAlgorithms.Aes256KW, SecurityAlgorithms.Aes256CbcHmacSha512));
+        });
+        builder.Services.AddOptions<OpenIddict.Validation.OpenIddictValidationOptions>().Configure<Settings>((options, config) =>
+        {
+            options.Audiences.Add(Resource(config));
+            if (DesktopOAuth.Configured(config)) options.Audiences.Add(DesktopOAuth.Resource(config));
         });
         builder.Services.AddAuthorizationBuilder().AddPolicy("chatgpt-mcp", policy =>
         {
@@ -212,7 +230,8 @@ internal sealed class ChatGptOAuth(Database db, Settings settings, NotificationS
     private (Actor? Actor, bool Managed) GetAccess(ClaimsPrincipal principal) => db.Run<(Actor?, bool)>((c, t) =>
     {
         var link = Get<ChatGptLink>(c, t, "chatgpt_link", LinkId);
-        if (link?.RedirectUri == null || principal.GetClaim(Claims.Subject) != settings.OwnerSub ||
+        if (link?.RedirectUri == null || !principal.GetAudiences().SequenceEqual([Resource(settings)]) ||
+            principal.GetClaim(Claims.Subject) != settings.OwnerSub ||
             !(principal.GetExpirationDate() > DateTimeOffset.UtcNow) ||
             !principal.GetPresenters().Contains(link.ClientId) ||
             Get<Source>(c, t, "source", link.SourceId) is not { Revoked: false } source)

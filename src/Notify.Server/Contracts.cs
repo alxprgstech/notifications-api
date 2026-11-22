@@ -109,6 +109,8 @@ public sealed class Settings
     public string PhoneAssistantAgentId { get; init; } = "";
     public PhoneAssistantDestination[] PhoneAssistantRoutes { get; init; } = [];
     public bool PhoneAssistantTiming { get; init; }
+    public string DesktopCodexAgentId { get; init; } = "";
+    public string DesktopHarnessAgentId { get; init; } = "";
     public bool SsoConfigured => Guid.TryParse(OwnerSub, out _) && WebClientSecret.Length >= 16;
     public void Validate(bool development)
     {
@@ -128,6 +130,10 @@ public sealed class Settings
         if (AudioQuotaBytes is < 1L * 1024 * 1024 or > 50L * 1024 * 1024 * 1024 || AudioUploadMinutes is < 1 or > 60 || AudioMessageTtlDays is < 1 or > 30) throw new InvalidOperationException("Invalid audio quota/upload/retention limits");
         if (CallAudioStartDelayMs is < 0 or > 10000) throw new InvalidOperationException("Invalid call audio start delay");
         var assistantRoutes = GetPhoneAssistantRoutes().ToArray();
+        if ((DesktopCodexAgentId.Length != 0 && !ValidPhoneAssistantId(DesktopCodexAgentId)) ||
+            (DesktopHarnessAgentId.Length != 0 && !ValidPhoneAssistantId(DesktopHarnessAgentId)) ||
+            (DesktopCodexAgentId.Length != 0 && DesktopCodexAgentId == DesktopHarnessAgentId))
+            throw new InvalidOperationException("Desktop OAuth requires separate valid agent IDs");
         if (assistantRoutes.Length != 0 &&
             (!ValidPhoneAssistantId(PhoneAssistantBridgeSourceId) ||
              assistantRoutes.Any(route => route.Extension.Length is < 2 or > 8 ||

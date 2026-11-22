@@ -6,6 +6,7 @@ namespace Notify;
 internal sealed class ChatGptKeys : IDisposable
 {
     private readonly RSA rsa = RSA.Create(3072);
+    private readonly InMemoryCryptoProviderCache cryptoCache = new();
     public RsaSecurityKey Signing { get; }
     public SymmetricSecurityKey Encryption { get; }
 
@@ -13,7 +14,13 @@ internal sealed class ChatGptKeys : IDisposable
     {
         rsa.ImportFromPem(System.Text.Encoding.ASCII.GetString(
             LoadOrCreate(Path.Combine(directory, "signing.pem"), () => System.Text.Encoding.ASCII.GetBytes(rsa.ExportPkcs8PrivateKeyPem()))));
-        Signing = new RsaSecurityKey(rsa) { KeyId = Convert.ToHexString(SHA256.HashData(rsa.ExportSubjectPublicKeyInfo())) };
+        // A host restart can reuse the key ID after disposing the previous host's RSA instance.
+        var providers = new CryptoProviderFactory(cryptoCache);
+        Signing = new RsaSecurityKey(rsa)
+        {
+            KeyId = Convert.ToHexString(SHA256.HashData(rsa.ExportSubjectPublicKeyInfo())),
+            CryptoProviderFactory = providers
+        };
         var key = LoadOrCreate(Path.Combine(directory, "encryption.key"), () => RandomNumberGenerator.GetBytes(32));
         Encryption = new SymmetricSecurityKey(key) { KeyId = Convert.ToHexString(SHA256.HashData(key)) };
     }
@@ -39,5 +46,9 @@ internal sealed class ChatGptKeys : IDisposable
         finally { File.Delete(temp); }
     }
 
-    public void Dispose() => rsa.Dispose();
+    public void Dispose()
+    {
+        cryptoCache.Dispose();
+        rsa.Dispose();
+    }
 }
