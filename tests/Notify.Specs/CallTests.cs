@@ -635,10 +635,27 @@ public sealed partial class CallTests
             using var codexControl = await ConnectAgentSessions(app, Token(codexHttp), agent1, ["notify-phone-assistant"]);
             Assert.Equal("8260", (await codexHttp.GetFromJsonAsync<PhoneAssistantRouteResponse>("/api/v1/telephony/assistant"))!.Extension);
             Assert.Equal("8261", (await deepSeekHttp.GetFromJsonAsync<PhoneAssistantRouteResponse>("/api/v1/telephony/assistant"))!.Extension);
+            using var unrelated = app.Integration(scopes: ["agents:connect"]).client;
+            Assert.Equal(HttpStatusCode.NotFound, (await unrelated.GetAsync("/api/v1/telephony/infrastructure")).StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, (await bridgeHttp.GetAsync("/api/v1/telephony/infrastructure")).StatusCode);
+            using var beforeHarness = await codexHttp.GetAsync("/api/v1/telephony/infrastructure");
+            Assert.Equal("no-store", beforeHarness.Headers.CacheControl?.ToString());
+            var waiting = (await beforeHarness.Content.ReadFromJsonAsync<PhoneInfrastructureResponse>())!;
+            Assert.Equal("8260", waiting.OwnExtension);
+            Assert.Equal("notify-api-process", waiting.UptimeSource);
+            Assert.True(waiting.ApiUptimeMs >= 0);
+            Assert.InRange(waiting.CheckedAt, Wire.Now - 5_000, Wire.Now);
+            Assert.Collection(waiting.Routes,
+                first => { Assert.Equal("8260", first.Extension); Assert.True(first.SessionReady); Assert.True(first.BridgeOnline); },
+                second => { Assert.Equal("8261", second.Extension); Assert.False(second.AgentOnline); Assert.True(second.BridgeOnline); });
 
             await SendText(bridge, new { type = "incoming", requestId = Wire.Id(), extension = "8261" });
             Assert.Equal("agent_offline", (await ReceiveJson(bridge)).GetProperty("code").GetString());
             using var deepSeekControl = await ConnectAgentSessions(app, Token(deepSeekHttp), agent2, ["notify-phone-assistant"]);
+            var ready = (await deepSeekHttp.GetFromJsonAsync<PhoneInfrastructureResponse>("/api/v1/telephony/infrastructure"))!;
+            Assert.Equal("8261", ready.OwnExtension);
+            Assert.True(ready.ApiUptimeMs >= waiting.ApiUptimeMs);
+            Assert.All(ready.Routes, line => Assert.True(line.SessionReady));
             foreach (var (extension, source, socket) in new[] { ("8260", codex.Id, codexControl), ("8261", deepSeek.Id, deepSeekControl) })
             {
                 var requestId = Wire.Id();

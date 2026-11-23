@@ -5,6 +5,8 @@ using System.Text.Json;
 namespace Notify;
 
 public sealed record PhoneAssistantRouteResponse(string Extension, bool BridgeOnline, bool AgentOnline, bool SessionReady);
+public sealed record PhoneInfrastructureResponse(long CheckedAt, long ApiUptimeMs, string UptimeSource,
+    string OwnExtension, PhoneAssistantRouteResponse[] Routes);
 
 public sealed partial class CallService
 {
@@ -176,13 +178,34 @@ public sealed partial class CallService
 
     internal PhoneAssistantRouteResponse PhoneAssistantRoute(Actor actor)
     {
+        var route = OwnPhoneRoute(actor, settings.GetPhoneAssistantRoutes());
+        return ReadPhoneRoute(route, BridgeIsOnline());
+    }
+
+    internal PhoneInfrastructureResponse PhoneInfrastructure(Actor actor, long apiUptimeMs)
+    {
+        var routes = settings.GetPhoneAssistantRoutes();
+        var own = OwnPhoneRoute(actor, routes);
+        var bridgeOnline = BridgeIsOnline();
+        return new(Wire.Now, apiUptimeMs, "notify-api-process", own.Extension,
+            routes.Select(route => ReadPhoneRoute(route, bridgeOnline)).ToArray());
+    }
+
+    private PhoneAssistantDestination OwnPhoneRoute(Actor actor, IEnumerable<PhoneAssistantDestination> routes)
+    {
         actor.RequireScope("agents:connect");
         var agentId = agents.ForSource(actor.Id)?.Id;
-        var route = settings.GetPhoneAssistantRoutes().FirstOrDefault(route => route.AgentId == agentId);
-        if (route == null)
-            throw new Fault(404, "phone_assistant_not_configured");
-        bool bridgeOnline;
-        lock (sync) bridgeOnline = sipPeer?.SourceId == settings.PhoneAssistantBridgeSourceId;
+        return routes.FirstOrDefault(route => route.AgentId == agentId)
+            ?? throw new Fault(404, "phone_assistant_not_configured");
+    }
+
+    private bool BridgeIsOnline()
+    {
+        lock (sync) return sipPeer?.SourceId == settings.PhoneAssistantBridgeSourceId;
+    }
+
+    private PhoneAssistantRouteResponse ReadPhoneRoute(PhoneAssistantDestination route, bool bridgeOnline)
+    {
         var online = agents.Online(route.AgentId);
         var sessionReady = online is { } live && live.CallProtocol == Protocol &&
             live.Capabilities.Contains("realtime_audio") && live.Sessions.Any(session => session.Id == PhoneAssistantSession);
