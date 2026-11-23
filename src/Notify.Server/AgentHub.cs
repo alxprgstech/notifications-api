@@ -22,10 +22,11 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
     public Func<Agent, JsonElement, Task>? ControlEvent { get; set; }
     public Func<Agent, Task>? DisconnectedEvent { get; set; }
 
-    private sealed class Connection(Agent agent, WebSocket socket)
+    private sealed class Connection(Agent agent, WebSocket socket, string? desktopGrant)
     {
         public Agent Agent { get; } = agent;
         public WebSocket Socket { get; } = socket;
+        public string? DesktopGrant { get; } = desktopGrant;
         public SemaphoreSlim SendLock { get; } = new(1, 1);
         public CancellationTokenSource Closing { get; } = new();
         public AgentSession[] Sessions { get; set; } = [];
@@ -122,6 +123,11 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
     {
         foreach (var pair in connections) if (pair.Value.Agent.SourceId == sourceId) pair.Value.Closing.Cancel();
     }
+    internal void DisconnectDesktopGrant(string agentId, string grant)
+    {
+        if (connections.TryGetValue(agentId, out var connection) && connection.DesktopGrant == grant)
+            connection.Closing.Cancel();
+    }
     public void MarkRevoked(string sourceId)
     {
         db.Run((c, t) =>
@@ -144,9 +150,21 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
         });
     }
 
-    public async Task Run(Agent agent, WebSocket socket, CancellationToken ct)
+    public Task Run(Agent agent, WebSocket socket, CancellationToken ct) => Run(agent, socket, ct, null, null);
+
+    internal async Task RunDesktop(Agent agent, WebSocket socket, CancellationToken ct, string grant,
+        DateTimeOffset expires, Func<bool> isActive)
     {
-        var connection = new Connection(agent, socket);
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var remaining = expires - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero) lifetime.Cancel();
+        else lifetime.CancelAfter(remaining);
+        await Run(agent, socket, lifetime.Token, grant, isActive);
+    }
+
+    private async Task Run(Agent agent, WebSocket socket, CancellationToken ct, string? grant, Func<bool>? isActive)
+    {
+        var connection = new Connection(agent, socket, grant);
         var registered = false;
         WebSocketCloseStatus? closeStatus = null; string? closeReason = null;
         try
@@ -162,6 +180,7 @@ public sealed class AgentHub(Database db, Settings settings, ILogger<AgentHub> l
             if (!connections.TryAdd(agent.Id, connection))
                 throw new AgentProtocolException("agent_already_connected");
             registered = true;
+            if (isActive?.Invoke() == false) throw new AgentProtocolException("desktop_grant_revoked");
             db.Run((c, t) =>
             {
                 if (Get<Source>(c, t, "source", agent.SourceId) is not { Revoked: false } source ||

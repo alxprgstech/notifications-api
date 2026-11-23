@@ -17,7 +17,7 @@ namespace NotifySpecs;
 
 public sealed class AppFactory : WebApplicationFactory<Program>
 {
-    public string Root { get; } = Path.Combine(AppContext.BaseDirectory, "artifacts", Wire.Id());
+    public string Root { get; init; } = Path.Combine(AppContext.BaseDirectory, "artifacts", Wire.Id());
     public string Issuer { get; set; } = "https://auth.alxprgs.tech";
     public string? TrustedProxyNetwork { get; set; }
     public string? WebhookReceiver { get; set; }
@@ -37,6 +37,8 @@ public sealed class AppFactory : WebApplicationFactory<Program>
     public string PhoneAssistantBridgeSourceId { get; set; } = "";
     public string PhoneAssistantAgentId { get; set; } = "";
     public PhoneAssistantDestination[] PhoneAssistantRoutes { get; set; } = [];
+    public string DesktopCodexAgentId { get; set; } = "";
+    public string DesktopHarnessAgentId { get; set; } = "";
     public SpeechStubFactory Speech { get; } = new();
     public static readonly string Owner = "67560410-fdaf-427f-bf96-76c3cbba266b";
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -49,13 +51,16 @@ public sealed class AppFactory : WebApplicationFactory<Program>
             ["Notify:OwnerSub"] = Owner,
             ["Notify:WebClientSecret"] = "synthetic-client-secret-not-a-real-credential",
             ["Notify:SsoIssuer"] = Issuer,
-            ["Notify:SttUrl"] = UseSpeechStub ? "http://stt:8080" : ""
+            ["Notify:SttUrl"] = UseSpeechStub ? "http://stt:8080" : "",
+            ["Notify:DesktopCodexAgentId"] = DesktopCodexAgentId,
+            ["Notify:DesktopHarnessAgentId"] = DesktopHarnessAgentId
         }));
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<Settings>(); services.AddSingleton(new Settings { DataPath = Root, PublicUrl = "https://localhost", OwnerSub = Owner, WebClientSecret = "synthetic-client-secret-not-a-real-credential", SsoIssuer = Issuer, TrustedProxyNetwork = TrustedProxyNetwork, WebhookHosts = ["fixture.test"], SourceDailyLimit = DailyLimit, AgentHeartbeatSeconds = AgentHeartbeatSeconds, AgentOfflineSeconds = AgentOfflineSeconds, AgentSendTimeoutSeconds = AgentSendTimeoutSeconds, AudioQuotaBytes = AudioQuotaBytes, AudioMessageTtlDays = AudioMessageTtlDays, CallRingSeconds = CallRingSeconds, CallMediaConnectSeconds = CallMediaConnectSeconds, CallQueueFrames = CallQueueFrames, CallAudioStartDelayMs = CallAudioStartDelayMs, SttUrl = UseSpeechStub ? "http://stt:8080" : "", SileroUrl = "http://silero:8080",
                 PhoneAssistantExtension = PhoneAssistantExtension, PhoneAssistantBridgeSourceId = PhoneAssistantBridgeSourceId,
-                PhoneAssistantAgentId = PhoneAssistantAgentId, PhoneAssistantRoutes = PhoneAssistantRoutes });
+                PhoneAssistantAgentId = PhoneAssistantAgentId, PhoneAssistantRoutes = PhoneAssistantRoutes,
+                DesktopCodexAgentId = DesktopCodexAgentId, DesktopHarnessAgentId = DesktopHarnessAgentId });
             if (UseSpeechStub) { services.RemoveAll<IHttpClientFactory>(); services.AddSingleton<IHttpClientFactory>(Speech); }
             foreach (var registration in services.Where(d => d.ImplementationType == typeof(DeliveryWorker)).ToList()) services.Remove(registration);
             if (PushSender != null) { services.RemoveAll<IPushSender>(); services.AddSingleton(PushSender); }

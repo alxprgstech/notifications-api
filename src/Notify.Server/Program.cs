@@ -17,6 +17,7 @@ using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using Microsoft.OpenApi;
 using Notify;
+using OpenIddict.Abstractions;
 using static Notify.Database;
 
 if (args.Length == 1 && args[0] == "health")
@@ -91,6 +92,7 @@ builder.Services.AddOptions<OpenIdConnectOptions>("sso").Configure<IHttpContextA
     o.StateDataFormat = new WebLoginState(http, protection, o.CallbackPath, o.RemoteAuthenticationTimeout, secureCookies));
 builder.Services.AddAuthorization();
 ChatGptOAuth.Register(builder, settings);
+builder.Services.AddScoped<DesktopOAuth>();
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = 429;
@@ -108,6 +110,8 @@ await using (var scope = app.Services.CreateAsyncScope())
     var chatGpt = scope.ServiceProvider.GetRequiredService<ChatGptOAuth>();
     await chatGpt.EnsureDefaultCallback();
     await chatGpt.EnsureRegisteredPermissions();
+    if (DesktopOAuth.Configured(settings))
+        await scope.ServiceProvider.GetRequiredService<DesktopOAuth>().RegisterClients();
 }
 if (!string.IsNullOrEmpty(settings.TrustedProxyNetwork)) app.UseForwardedHeaders();
 app.Use(async (context, next) =>
@@ -116,6 +120,7 @@ app.Use(async (context, next) =>
     context.Response.Headers.ContentSecurityPolicy = BrowserReturnPage.ContentSecurityPolicy();
     if (context.Request.Path.StartsWithSegments("/api") || context.Request.Path.StartsWithSegments("/auth") || context.Request.Path.StartsWithSegments("/android")) context.Response.Headers.CacheControl = "no-store";
     ChatGptOAuth.ProtectResponse(context, settings);
+    if (context.Request.Path.StartsWithSegments("/desktop/oauth")) context.Response.Headers.CacheControl = "no-store";
     try { await next(); }
     catch (Fault e) when (!context.Response.HasStarted) { context.Response.StatusCode = e.Status; await context.Response.WriteAsJsonAsync(new { code = e.Code }); }
     catch (BadHttpRequestException) when (!context.Response.HasStarted) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { code = "invalid_request" }); }
@@ -266,7 +271,16 @@ api.Map("/agents/connect", async (HttpContext c, AgentHub hub, CancellationToken
     var agent = hub.ForSource(actor.Id) ?? throw new Fault(403, "agent_not_registered");
     if (!c.WebSockets.IsWebSocketRequest) throw new Fault(400, "websocket_required");
     var socket = await c.WebSockets.AcceptWebSocketAsync();
-    await hub.Run(agent, socket, ct);
+    var grant = c.User.FindFirstValue(DesktopOAuth.GrantClaim);
+    if (grant is null)
+    {
+        await hub.Run(agent, socket, ct);
+        return;
+    }
+    var oauth = c.RequestServices.GetRequiredService<DesktopOAuth>();
+    var authentication = await c.AuthenticateAsync(DesktopOAuth.Validation);
+    var expires = authentication.Principal?.GetExpirationDate() ?? DateTimeOffset.UtcNow;
+    await hub.RunDesktop(agent, socket, ct, grant, expires, () => oauth.IsActive(actor.Id, grant));
 }).ExcludeFromDescription();
 api.MapPost("/devices/fcm", (FcmInput input, HttpContext c, NotificationService service) => { service.SetFcm(Auth.Actor(c), input.Token); return Results.NoContent(); });
 api.MapGet("/sources", (HttpContext c, NotificationService service) => service.Sources(Auth.Actor(c)));
@@ -302,6 +316,7 @@ api.MapGet("/icons/{id}", (string id, HttpContext c, Database db) =>
 });
 app.MapMcp("/mcp").RequireAuthorization();
 ChatGptOAuth.Map(app, api, settings);
+if (DesktopOAuth.Configured(settings)) DesktopOAuth.Map(app, api);
 app.MapOpenApi("/openapi/{documentName}.json");
 app.UseDefaultFiles(); app.UseStaticFiles();
 app.MapFallback(async c =>
@@ -328,9 +343,23 @@ public sealed class LocalAuthentication(IOptionsMonitor<AuthenticationSchemeOpti
         var header = Request.Headers.Authorization.ToString(); Actor? actor = null;
         if (header.StartsWith("Bearer ", StringComparison.Ordinal))
         {
-            if (header.Length > 512) return AuthenticateResult.Fail("Invalid bearer");
-            actor = Context.RequestServices.GetRequiredService<NotificationService>().Authenticate(header[7..]);
-            if (actor == null) return AuthenticateResult.Fail("Invalid credential");
+            if (header.Length <= 512)
+                actor = Context.RequestServices.GetRequiredService<NotificationService>().Authenticate(header[7..]);
+            if (actor == null)
+            {
+                var settings = Context.RequestServices.GetRequiredService<Settings>();
+                if (header.Length > 4096 || !DesktopOAuth.Configured(settings) || !DesktopOAuth.IsResourceRequest(Request.Path))
+                    return AuthenticateResult.Fail("Invalid credential");
+                var oauth = await Context.AuthenticateAsync(DesktopOAuth.Validation);
+                if (oauth.Principal is null ||
+                    Context.RequestServices.GetRequiredService<DesktopOAuth>().GetAccess(oauth.Principal) is not { } desktop)
+                    return AuthenticateResult.Fail("Invalid credential");
+                var desktopClaims = new List<Claim> {
+                    new("notify_kind", "integration"), new("notify_id", desktop.SourceId),
+                    new("notify_scope", DesktopOAuth.Scope), new(DesktopOAuth.GrantClaim, desktop.GrantId)
+                };
+                return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(new ClaimsIdentity(desktopClaims, Scheme.Name)), Scheme.Name));
+            }
         }
         else
         {
