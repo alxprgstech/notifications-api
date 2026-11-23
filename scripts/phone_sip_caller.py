@@ -14,18 +14,19 @@ from io import BytesIO
 import aiohttp
 
 
-async def call(samples, host, number, require_ringback=False):
+async def call(samples, host, number, require_ringback=False, *, sip_port=5060, caller_address="127.0.0.1"):
     sip = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     for sock in (sip, rtp):
-        sock.bind(("127.0.0.1", 0))
+        sock.bind((caller_address, 0))
         sock.setblocking(False)
     loop = asyncio.get_running_loop()
-    local = f"127.0.0.1:{sip.getsockname()[1]}"
-    remote = f"sip:{number}@{host}"
+    local = f"{caller_address}:{sip.getsockname()[1]}"
+    authority = host if sip_port == 5060 else f"{host}:{sip_port}"
+    remote = f"sip:{number}@{authority}"
     local_uri = f"sip:phone-lab@{local}"
     call_id, tag = secrets.token_hex(12), secrets.token_hex(6)
-    target = (host, 5060)
+    target = (host, sip_port)
     cseq = 1
     to = f"<{remote}>"
 
@@ -39,7 +40,7 @@ async def call(samples, host, number, require_ringback=False):
             headers.append("Content-Type: application/sdp")
         await loop.sock_sendto(sip, ("\r\n".join(headers) + "\r\n\r\n" + body).encode(), target)
 
-    body = "\r\n".join(["v=0", "o=phone 1 1 IN IP4 127.0.0.1", "s=Notify test", "c=IN IP4 127.0.0.1",
+    body = "\r\n".join(["v=0", f"o=phone 1 1 IN IP4 {caller_address}", "s=Notify test", f"c=IN IP4 {caller_address}",
                           "t=0 0", f"m=audio {rtp.getsockname()[1]} RTP/AVP 0", "a=rtpmap:0 PCMU/8000", ""])
     before = time.monotonic()
     ringing_ms = None
